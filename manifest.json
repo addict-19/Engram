@@ -1,0 +1,12 @@
+{
+    "display_name": "Engram · 织忆",
+    "loading_order": 100,
+    "requires": [],
+    "optional": [],
+    "js": "dist/index.js",
+    "css": "style.css",
+    "author": "Addict",
+    "version": "0.0.1",
+    "homePage": "https://github.com/addict-19/Engram",
+    "auto_update": true
+}
