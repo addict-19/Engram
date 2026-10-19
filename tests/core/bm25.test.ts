@@ -148,6 +148,33 @@ describe('BM25Index', () => {
     }
   });
 
+  it('分词器指纹：同名 round-trip 通过，toJSON 带 tokenizerName', () => {
+    const a = new BM25Index(bigramTokenizer, { tokenizerName: 'jieba-v1' });
+    a.add('s1', '戒指');
+    const j = a.toJSON() as { tokenizerName: string };
+    expect(j.tokenizerName).toBe('jieba-v1');
+    const b = BM25Index.fromJSON(j, bigramTokenizer, { tokenizerName: 'jieba-v1' });
+    expect(b.search('戒指', 1)[0]!.id).toBe('s1');
+    // 默认名 bigram-v1
+    expect((new BM25Index(bigramTokenizer).toJSON() as { tokenizerName: string }).tokenizerName).toBe('bigram-v1');
+  });
+
+  it('分词器指纹不符或缺失时抛 E_BM25_TOKENIZER（拒载重建，不静默混用）', () => {
+    const a = new BM25Index(bigramTokenizer);
+    a.add('s1', '戒指');
+    const code = (fn: () => unknown) => {
+      try { fn(); return 'no-throw'; } catch (e) { return (e as EngramError).code; }
+    };
+    const tampered = { ...(a.toJSON() as object), tokenizerName: 'jieba-v1' };
+    expect(code(() => BM25Index.fromJSON(tampered, bigramTokenizer))).toBe('E_BM25_TOKENIZER');
+    // 数据是 bigram-v1，但调用方期望 jieba-v1
+    expect(code(() => BM25Index.fromJSON(a.toJSON(), bigramTokenizer, { tokenizerName: 'jieba-v1' })))
+      .toBe('E_BM25_TOKENIZER');
+    // 旧格式（无字段）同样拒载
+    const { tokenizerName: _drop, ...legacy } = a.toJSON() as Record<string, unknown>;
+    expect(code(() => BM25Index.fromJSON(legacy, bigramTokenizer))).toBe('E_BM25_TOKENIZER');
+  });
+
   it('tokenizer 可插拔', () => {
     const ws = (t: string) => t.split(/\s+/).filter(Boolean);
     const idx = new BM25Index(ws);

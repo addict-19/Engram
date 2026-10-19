@@ -72,12 +72,17 @@ export interface BM25Options {
   b?: number;
   /** 锚点命中分的倍率（相对单个普通词满分），默认 3：生造词整词命中是强信号。 */
   anchorBoost?: number;
+  /** 分词器指纹，写进序列化数据；fromJSON 时不符即拒载。默认 'bigram-v1'。 */
+  tokenizerName?: string;
 }
+
+const DEFAULT_TOKENIZER_NAME = 'bigram-v1';
 
 interface DocEntry { len: number; tf: Map<string, number> }
 
 interface BM25JSON {
   v: 1;
+  tokenizerName: string;
   k1: number;
   b: number;
   anchorBoost: number;
@@ -89,6 +94,7 @@ export class BM25Index {
   private readonly k1: number;
   private readonly b: number;
   private readonly anchorBoost: number;
+  private readonly tokenizerName: string;
   /** term → (id → tf) */
   private readonly postings = new Map<string, Map<string, number>>();
   private readonly docs = new Map<string, DocEntry>();
@@ -103,6 +109,7 @@ export class BM25Index {
     this.k1 = opts.k1 ?? 1.2;
     this.b = opts.b ?? 0.75;
     this.anchorBoost = opts.anchorBoost ?? 3;
+    this.tokenizerName = opts.tokenizerName ?? DEFAULT_TOKENIZER_NAME;
   }
 
   /** 已索引的文档数（含仅挂锚点的 id）。 */
@@ -181,6 +188,7 @@ export class BM25Index {
   toJSON(): unknown {
     const j: BM25JSON = {
       v: 1,
+      tokenizerName: this.tokenizerName,
       k1: this.k1,
       b: this.b,
       anchorBoost: this.anchorBoost,
@@ -190,18 +198,31 @@ export class BM25Index {
     return j;
   }
 
-  static fromJSON(j: unknown, tokenizer: Tokenizer): BM25Index {
+  /**
+   * 还原索引。JSON 内 tokenizerName 与期望（opts.tokenizerName ?? 'bigram-v1'）不符、
+   * 或缺此字段时抛 E_BM25_TOKENIZER——宁可拒载从全文重建，不让新旧分词的 term 静默混用。
+   */
+  static fromJSON(j: unknown, tokenizer: Tokenizer, opts: { tokenizerName?: string } = {}): BM25Index {
     const bad = (why: string): never => {
       throw new EngramError('E_BM25_FORMAT', `BM25 序列化数据无效：${why}`);
     };
     if (!j || typeof j !== 'object') bad('不是对象');
     const o = j as Partial<BM25JSON>;
     if (o.v !== 1) bad(`不支持的版本 ${String(o.v)}`);
+    const expected = opts.tokenizerName ?? DEFAULT_TOKENIZER_NAME;
+    if (o.tokenizerName !== expected) {
+      throw new EngramError(
+        'E_BM25_TOKENIZER',
+        `BM25 分词器指纹不符：数据为 ${String(o.tokenizerName)}，期望 ${expected}，需从全文重建`,
+      );
+    }
     const num = (x: unknown) => typeof x === 'number' && Number.isFinite(x);
     if (!num(o.k1) || !num(o.b) || !num(o.anchorBoost)) bad('参数缺失');
     if (!Array.isArray(o.docs) || !Array.isArray(o.anchors)) bad('docs/anchors 不是数组');
 
-    const idx = new BM25Index(tokenizer, { k1: o.k1!, b: o.b!, anchorBoost: o.anchorBoost! });
+    const idx = new BM25Index(tokenizer, {
+      k1: o.k1!, b: o.b!, anchorBoost: o.anchorBoost!, tokenizerName: expected,
+    });
     for (const d of o.docs!) {
       if (!Array.isArray(d) || typeof d[0] !== 'string' || !num(d[1]) || !Array.isArray(d[2])) bad('docs 条目结构错误');
       const tf = new Map<string, number>();
