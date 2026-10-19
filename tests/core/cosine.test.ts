@@ -29,6 +29,15 @@ describe('cosine topK', () => {
     const r = topK(v(1, 0), entries, 3);
     expect(r.map((x) => x.id)).toEqual(['hi', 'mid', 'lo']);
   });
+  it('entries 混入维度不符的向量时抛 E_COS_DIM', () => {
+    const entries: [string, Float32Array][] = [
+      ['ok', v(1, 0, 0)],
+      ['short', v(1, 0)],
+    ];
+    expect(() => topK(v(1, 0, 0), entries, 2)).toThrow(
+      expect.objectContaining({ code: 'E_COS_DIM' }),
+    );
+  });
   it('normalize 零向量返回零向量（不除零、不抛错）', () => {
     const r = normalize(v(0, 0, 0));
     expect(Array.from(r)).toEqual([0, 0, 0]);
@@ -43,8 +52,6 @@ describe('cosine topK', () => {
     const q = normalize(entries[0]![1]);
     const t0 = performance.now();
     topK(q, entries, 50);
-    const elapsed = performance.now() - t0;
-    console.log(`[perf] topK 30000x512 k=50: ${elapsed.toFixed(1)}ms`);
-    expect(elapsed).toBeLessThan(500);
+    expect(performance.now() - t0).toBeLessThan(500);
   });
 });

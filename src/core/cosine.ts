@@ -1,6 +1,9 @@
 // src/core/cosine.ts
 // 余弦暴力检索：纯函数、零依赖、零 IO。
 // 入库前用 normalize 归一化，检索时点积即余弦。
+// 维度不符直接抛 E_COS_DIM，绝不静默产出错误分数。
+
+import { EngramError } from './errors.js';
 
 /** L2 归一化，返回新数组。零向量原样返回一个零向量副本（不除零、不抛错）。 */
 export function normalize(v: Float32Array): Float32Array {
@@ -14,7 +17,7 @@ export function normalize(v: Float32Array): Float32Array {
 }
 
 function dot(a: Float32Array, b: Float32Array): number {
-  const n = a.length < b.length ? a.length : b.length;
+  const n = a.length;
   let s = 0;
   for (let i = 0; i < n; i++) s += a[i]! * b[i]!;
   return s;
@@ -58,7 +61,14 @@ export function topK(
     }
   };
 
+  const dim = query.length;
   for (const [id, vec] of entries) {
+    if (vec.length !== dim) {
+      throw new EngramError(
+        'E_COS_DIM',
+        `E_COS_DIM: entry "${id}" 维度 ${vec.length} 与 query 维度 ${dim} 不符`,
+      );
+    }
     const s = dot(query, vec);
     if (scores.length < k) {
       ids.push(id);
