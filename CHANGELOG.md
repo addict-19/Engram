@@ -16,3 +16,5 @@
 
 ### Fixed
 - 库：日志条数极多时 openLibrary 不再因展开传参求最大 seq 抛 RangeError；运行中追加失败后，下一次追加先补换行，避免可能残留的半行拼坏新行。
+- 库：appendDelta 写盘前校验 lib/op 合法且能通过 round-trip 解析，不合法抛 `E_LIB_DELTA`，不再出现写入成功、读盘时却被静默丢弃的 delta。
+- 测试护栏：crypto 零引用检查扩展到 src/core 全部源码与 dist/core.js；fnv1a32 加已知向量断言，锁定落盘哈希算法。

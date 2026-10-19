@@ -3,7 +3,7 @@ import { describe, it, expect } from 'vitest';
 import { mkdtemp, readFile, writeFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { VectorStore } from '../../src/core/vectorStore.js';
+import { VectorStore, fnv1a32 } from '../../src/core/vectorStore.js';
 
 const fp = { model: 'bge-small-zh-q8', dim: 4, quant: 'f32' as const };
 const v = (...n: number[]) => new Float32Array(n);
@@ -106,4 +106,9 @@ describe('VectorStore', () => {
     await expect(VectorStore.load(join(tmpdir(), 'engram-nope-' + Date.now()))).rejects
       .toMatchObject({ code: expect.stringMatching(/^E_VEC_/) });
   });
+});
+
+describe('fnv1a32 已知向量（落盘格式护栏，换算法即红）', () => {
+  it('空输入 = 0x811c9dc5', () => expect(fnv1a32(new Uint8Array())).toBe(0x811c9dc5));
+  it('单字节 "a" = 0xe40c292c', () => expect(fnv1a32(new TextEncoder().encode('a'))).toBe(0xe40c292c));
 });

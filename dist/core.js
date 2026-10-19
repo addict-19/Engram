@@ -71,6 +71,7 @@ function parseDeltaLine(line) {
 import { mkdir, readFile, readdir, appendFile } from "node:fs/promises";
 import { join } from "node:path";
 var LIB_KINDS = ["chronicle", "persona", "atlas", "treasury", "knowledge", "extra"];
+var DELTA_OPS = ["create", "update", "delete"];
 var META = "meta.json";
 var LOG = "log.jsonl";
 var SNAPSHOT = "snapshot.json";
@@ -169,6 +170,9 @@ var Library = class {
   appendDelta(d) {
     return this.serial(() => libIO(async () => {
       const full = { ...d, seq: this.lastSeq + 1, ts: (/* @__PURE__ */ new Date()).toISOString() };
+      if (!LIB_KINDS.includes(full.lib)) throw new EngramError("E_LIB_DELTA", `\u975E\u6CD5 lib\uFF1A${String(full.lib)}`);
+      if (!DELTA_OPS.includes(full.op)) throw new EngramError("E_LIB_DELTA", `\u975E\u6CD5 op\uFF1A${String(full.op)}`);
+      if (!parseDeltaLine(serializeDelta(full))) throw new EngramError("E_LIB_DELTA", "delta \u65E0\u6CD5\u901A\u8FC7 round-trip \u89E3\u6790\uFF08\u68C0\u67E5 floor/id/payload\uFF09");
       const line = (this.needsNewline ? "\n" : "") + serializeDelta(full) + "\n";
       try {
         await appendFile(join(this.dir, LOG), line, "utf8");

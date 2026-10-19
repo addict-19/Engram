@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { uuidv4 } from '../../src/core/uuid.js';
 
 describe('uuidv4', () => {
@@ -10,9 +10,11 @@ describe('uuidv4', () => {
     const s = new Set(Array.from({ length: 1000 }, () => uuidv4()));
     expect(s.size).toBe(1000);
   });
-  it('不依赖全局 crypto（LAN http 场景）', () => {
-    // 模块代码里不得出现 crypto 引用——用源码断言（契约测试）
-    const src = readFileSync(new URL('../../src/core/uuid.ts', import.meta.url), 'utf8');
-    expect(/\bcrypto\./.test(src)).toBe(false);
+  it('不依赖 crypto（LAN http 场景）：src/core 全部源码与 dist/core.js 零引用', () => {
+    // 契约测试：任何 core 模块或打包产物里出现 crypto 字样都算违约
+    const coreDir = new URL('../../src/core/', import.meta.url);
+    const files = readdirSync(coreDir).filter((f) => f.endsWith('.ts')).map((f) => new URL(f, coreDir));
+    files.push(new URL('../../dist/core.js', import.meta.url));
+    for (const f of files) expect(/\bcrypto\b/.test(readFileSync(f, 'utf8')), f.pathname).toBe(false);
   });
 });

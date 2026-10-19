@@ -12,6 +12,7 @@ import {
 } from './delta.js';
 
 export const LIB_KINDS: readonly LibKind[] = ['chronicle', 'persona', 'atlas', 'treasury', 'knowledge', 'extra'];
+const DELTA_OPS: readonly Delta['op'][] = ['create', 'update', 'delete'];
 
 const META = 'meta.json';
 const LOG = 'log.jsonl';
@@ -138,6 +139,10 @@ class Library implements LibraryHandle {
   appendDelta(d: Omit<Delta, 'seq' | 'ts'>): Promise<Delta> {
     return this.serial(() => libIO(async () => {
       const full: Delta = { ...d, seq: this.lastSeq + 1, ts: new Date().toISOString() };
+      // 写盘前校验：读取侧会丢弃的行绝不能写进去，否则"写入成功"却在读盘时静默消失
+      if (!LIB_KINDS.includes(full.lib)) throw new EngramError('E_LIB_DELTA', `非法 lib：${String(full.lib)}`);
+      if (!DELTA_OPS.includes(full.op)) throw new EngramError('E_LIB_DELTA', `非法 op：${String(full.op)}`);
+      if (!parseDeltaLine(serializeDelta(full))) throw new EngramError('E_LIB_DELTA', 'delta 无法通过 round-trip 解析（检查 floor/id/payload）');
       const line = (this.needsNewline ? '\n' : '') + serializeDelta(full) + '\n';
       try {
         await appendFile(join(this.dir, LOG), line, 'utf8');   // 唯一不走原子写的文件：append-only，行自带完整性

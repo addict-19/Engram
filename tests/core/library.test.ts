@@ -114,3 +114,25 @@ describe('library 补充行为', () => {
     expect(list[0]).toMatchObject({ id: a.id, displayName: 'A' });
   });
 });
+
+describe('appendDelta 写盘前校验', () => {
+  const bad: Array<[string, Record<string, unknown>]> = [
+    ['payload 为 null', { floor: 2, lib: 'atlas', op: 'update', id: 'a', payload: null }],
+    ['floor 为 NaN', { floor: NaN, lib: 'atlas', op: 'update', id: 'a', payload: { x: 1 } }],
+    ['lib 非法', { floor: 2, lib: 'nope', op: 'update', id: 'a', payload: { x: 1 } }],
+  ];
+  for (const [name, d] of bad) {
+    it(`${name}：抛 E_LIB_DELTA 且日志不新增行`, async () => {
+      const root = await mkdtemp(join(tmpdir(), 'engram-'));
+      const lib = await createLibrary(root, 't');
+      await lib.appendDelta({ floor: 1, lib: 'atlas', op: 'create', id: 'a', payload: { name: '港口' } });
+      const logPath = join(root, lib.id, 'log.jsonl');
+      const before = await readFile(logPath, 'utf8');
+      await expect(lib.appendDelta(d as never)).rejects.toMatchObject({ code: 'E_LIB_DELTA' });
+      expect(await readFile(logPath, 'utf8')).toBe(before);
+      // seq 未被消耗
+      const next = await lib.appendDelta({ floor: 3, lib: 'atlas', op: 'update', id: 'a', payload: { y: 1 } });
+      expect(next.seq).toBe(2);
+    });
+  }
+});
