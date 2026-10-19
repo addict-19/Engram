@@ -90,6 +90,8 @@ function computeState(log: Delta[], snap: Snapshot | null, kind: LibKind, maxFlo
   const limit = maxFloor ?? Infinity;
   const ofKind = log.filter((d) => d.lib === kind);
   if (snap) {
+    // 覆盖楼层从日志推算，隐含两个前提：① 日志永不压缩/截断（快照前的 delta 全在）；
+    // ② 被 parse 丢弃的坏行恰好就是当初没生效的行（快照内容与可读日志一致）
     const covered = ofKind.filter((d) => d.seq <= snap.seq);
     const coveredFloor = covered.reduce((m, d) => Math.max(m, d.floor), -Infinity);
     if (limit >= coveredFloor) {
@@ -137,7 +139,13 @@ class Library implements LibraryHandle {
     return this.serial(() => libIO(async () => {
       const full: Delta = { ...d, seq: this.lastSeq + 1, ts: new Date().toISOString() };
       const line = (this.needsNewline ? '\n' : '') + serializeDelta(full) + '\n';
-      await appendFile(join(this.dir, LOG), line, 'utf8');   // 唯一不走原子写的文件：append-only，行自带完整性
+      try {
+        await appendFile(join(this.dir, LOG), line, 'utf8');   // 唯一不走原子写的文件：append-only，行自带完整性
+      } catch (e) {
+        // 失败时可能已落盘半行（如磁盘满）：保守地让下一次先补换行，免得新行被拼坏
+        this.needsNewline = true;
+        throw e;
+      }
       this.needsNewline = false;
       this.lastSeq = full.seq;
       return full;
@@ -189,7 +197,8 @@ export async function openLibrary(rootDir: string, libId: string): Promise<Libra
     const meta = parseMeta(await readFile(join(dir, META), 'utf8'));
     const logText = await readTextOrNull(join(dir, LOG));
     const snap = parseSnapshot(await readTextOrNull(join(dir, SNAPSHOT)));
-    const lastSeq = Math.max(0, meta.snapshotSeq, snap?.seq ?? 0, ...parseLog(logText).map((d) => d.seq));
+    // 不用 Math.max(...数组) 展开传参：日志永久增长，条数超引擎参数上限（约十万）会抛 RangeError 导致库打不开
+    const lastSeq = parseLog(logText).reduce((m, d) => Math.max(m, d.seq), Math.max(0, meta.snapshotSeq, snap?.seq ?? 0));
     const needsNewline = !!logText && !logText.endsWith('\n');
     return new Library(dir, meta, lastSeq, needsNewline);
   }, 'E_LIB_OPEN');
