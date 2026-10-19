@@ -1,8 +1,7 @@
 {
   "name": "engram",
-  "version": "1.0.0",
-  "description": "> 每段经历都是一道会被重新点亮的刻痕，从切片到系列，编织出一部完整的历史。",
-  "main": "index.js",
+  "version": "0.0.1",
+  "description": "Long-term memory extension for SillyTavern",
   "scripts": {
     "test": "vitest run",
     "build": "node build.mjs"
@@ -12,8 +11,7 @@
     "url": "git+https://github.com/addict-19/Engram.git"
   },
   "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "author": "Addict",
   "type": "module",
   "devDependencies": {
     "@types/node": "^26.6.5",

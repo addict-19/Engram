@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { uuidv4 } from '../../src/core/uuid.js';
 
 describe('uuidv4', () => {
@@ -10,7 +11,8 @@ describe('uuidv4', () => {
     expect(s.size).toBe(1000);
   });
   it('不依赖全局 crypto（LAN http 场景）', () => {
-    // 模块代码里不得出现 crypto 引用——用源码断言（契约测试，F2 思路）
-    // 实现见 Step 3：纯 Math.random
+    // 模块代码里不得出现 crypto 引用——用源码断言（契约测试）
+    const src = readFileSync(new URL('../../src/core/uuid.ts', import.meta.url), 'utf8');
+    expect(/\bcrypto\./.test(src)).toBe(false);
   });
 });
