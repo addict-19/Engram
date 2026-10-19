@@ -17,10 +17,11 @@ export interface Entity { id: string; [k: string]: unknown }
 export function applyDeltas(base: Record<string, Entity>, deltas: Delta[]): Record<string, Entity> {
   const out: Record<string, Entity> = { ...base };
   for (const dl of deltas) {
-    if (dl.op === 'create') out[dl.id] = { id: dl.id, ...dl.payload };
+    // id 放在 spread 之后：payload 里的 id 字段永远覆盖不了实体 id
+    if (dl.op === 'create') out[dl.id] = { ...dl.payload, id: dl.id };
     else if (dl.op === 'update') {
       const cur = out[dl.id];
-      if (cur) out[dl.id] = { ...cur, ...dl.payload };
+      if (cur) out[dl.id] = { ...cur, ...dl.payload, id: dl.id };
       // 不存在则跳过：坏 delta 不连坐（局部容错）
     } else if (dl.op === 'delete') delete out[dl.id];
   }
@@ -40,6 +41,8 @@ export function parseDeltaLine(line: string): Delta | null {
   try {
     const o = JSON.parse(line);
     if (typeof o?.seq !== 'number' || typeof o?.floor !== 'number' || typeof o?.id !== 'string') return null;
+    // payload 若存在必须是普通对象：字符串/数组/null 被 spread 会污染实体
+    if (o.payload !== undefined && (typeof o.payload !== 'object' || o.payload === null || Array.isArray(o.payload))) return null;
     return o as Delta;
   } catch { return null; }
 }

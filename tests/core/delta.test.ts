@@ -40,3 +40,31 @@ describe('JSONL 序列化', () => {
     expect(parseDeltaLine('')).toBeNull();
   });
 });
+
+describe('实体 id 不可被 payload 覆盖', () => {
+  it('create：payload 带不同 id 时实体 id 仍等于 delta.id', () => {
+    const out = applyDeltas({}, [d(1, 1, 'create', 'ring', { id: 'evil', title: '戒指' })]);
+    expect(out['ring']?.id).toBe('ring');
+  });
+  it('update：payload 带不同 id 时实体 id 仍等于 delta.id', () => {
+    const out = applyDeltas({}, [
+      d(1, 1, 'create', 'ring', { title: '戒指' }),
+      d(2, 2, 'update', 'ring', { id: 'evil', count: 2 }),
+    ]);
+    expect(out['ring']).toMatchObject({ id: 'ring', count: 2 });
+  });
+});
+
+describe('parseDeltaLine payload 校验', () => {
+  const base = { seq: 1, floor: 1, ts: '2026-10-19T20:00:00+08:00', lib: 'treasury', op: 'create', id: 'ring' };
+  it('payload 为字符串返回 null', () => {
+    expect(parseDeltaLine(JSON.stringify({ ...base, payload: 'abc' }))).toBeNull();
+  });
+  it('payload 为数组返回 null', () => {
+    expect(parseDeltaLine(JSON.stringify({ ...base, payload: [1, 2] }))).toBeNull();
+  });
+  it('合法对象 payload 照常通过', () => {
+    const line = JSON.stringify({ ...base, payload: { title: '戒指' } });
+    expect(parseDeltaLine(line)).toEqual({ ...base, payload: { title: '戒指' } });
+  });
+});
