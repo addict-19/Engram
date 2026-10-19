@@ -19,6 +19,16 @@ function isFingerprint(x: unknown): x is VectorFingerprint {
   return typeof f.model === 'string' && Number.isInteger(f.dim) && (f.dim as number) > 0 && f.quant === 'f32';
 }
 
+// FNV-1a 32 位：给 vectors.bin 上完整性锁，防"新 bin 配旧 index"错位或字节损坏
+export function fnv1a32(bytes: Uint8Array): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < bytes.length; i++) {
+    h ^= bytes[i]!;
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+
 // message 以错误码开头：调用方/测试按文本也能认出是哪类错
 const vecErr = (code: string, msg: string, cause?: unknown) => new EngramError(code, `${code}: ${msg}`, cause);
 
@@ -55,7 +65,7 @@ export class VectorStore {
   // 返回库内数组本体（检索热路径不拷贝），调用方只读不写
   entries(): Iterable<[string, Float32Array]> { return this.vecs.entries(); }
 
-  // 先写 vectors.bin 再写 index.json，各自 tmp+rename；load 时以长度校验兜底
+  // 先写 vectors.bin 再写 index.json，各自 tmp+rename；index 记下 bin 的字节数与 hash，load 时双校验兜底跨文件不一致
   async save(dir: string): Promise<void> {
     const { dim } = this.fingerprint;
     const ids = this.ids;
@@ -71,7 +81,7 @@ export class VectorStore {
       const tmp = `${bin}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
       await writeFile(tmp, buf);
       await rename(tmp, bin);
-      await writeFileAtomic(join(dir, INDEX), JSON.stringify({ fingerprint: this.fingerprint, ids }));
+      await writeFileAtomic(join(dir, INDEX), JSON.stringify({ fingerprint: this.fingerprint, ids, binBytes: buf.length, binHash: fnv1a32(buf) }));
     }, 'E_VEC_SAVE');
   }
 
@@ -79,8 +89,10 @@ export class VectorStore {
   static async load(dir: string, expected?: VectorFingerprint): Promise<VectorStore> {
     return vecIO(async () => {
       const idx: unknown = JSON.parse(await readFile(join(dir, INDEX), 'utf8'));
-      const { fingerprint, ids } = (idx ?? {}) as { fingerprint?: unknown; ids?: unknown };
-      if (!isFingerprint(fingerprint) || !Array.isArray(ids) || !ids.every((x) => typeof x === 'string')) {
+      const { fingerprint, ids, binBytes, binHash } =
+        (idx ?? {}) as { fingerprint?: unknown; ids?: unknown; binBytes?: unknown; binHash?: unknown };
+      if (!isFingerprint(fingerprint) || !Array.isArray(ids) || !ids.every((x) => typeof x === 'string')
+        || !Number.isInteger(binBytes) || !Number.isInteger(binHash)) {
         throw vecErr('E_VEC_CORRUPT', `${INDEX} 结构非法`);
       }
       if (expected && !sameFingerprint(fingerprint, expected)) {
@@ -88,6 +100,10 @@ export class VectorStore {
           `向量指纹不符：文件 ${JSON.stringify(fingerprint)}，期望 ${JSON.stringify(expected)}`);
       }
       const buf = await readFile(join(dir, BIN));
+      if (buf.length !== binBytes) {
+        throw vecErr('E_VEC_CORRUPT', `${BIN} 字节数 ${buf.length} 与 ${INDEX} 记录的 ${binBytes} 不符`);
+      }
+      if (fnv1a32(buf) !== binHash) throw vecErr('E_VEC_CORRUPT', `${BIN} hash 与 ${INDEX} 记录不符`);
       const { dim } = fingerprint;
       if (buf.length !== ids.length * dim * 4) {
         throw vecErr('E_VEC_CORRUPT', `${BIN} 长度 ${buf.length} 与 ${ids.length}×${dim}×4 不符`);

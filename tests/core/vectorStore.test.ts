@@ -50,7 +50,42 @@ describe('VectorStore', () => {
     expect(buf.readFloatLE(0)).toBe(1);
     expect(buf.readFloatLE(16)).toBe(-0.25);
     const idx = JSON.parse(await readFile(join(dir, 'index.json'), 'utf8'));
-    expect(idx).toEqual({ fingerprint: fp, ids: ['a', 'b'] });
+    expect(idx).toMatchObject({ fingerprint: fp, ids: ['a', 'b'], binBytes: 32 });
+    expect(typeof idx.binHash).toBe('number');
+  });
+  it('vectors.bin 长度不变但字节被篡改时拒载（hash 校验）', async () => {
+    const s = new VectorStore(fp);
+    s.add('a', v(1, 0, 0, 0));
+    s.add('b', v(0, 1, 0, 0));
+    const dir = await mkdtemp(join(tmpdir(), 'engram-'));
+    await s.save(dir);
+    const buf = await readFile(join(dir, 'vectors.bin'));
+    buf[5] = buf[5]! ^ 0xff;
+    await writeFile(join(dir, 'vectors.bin'), buf);
+    await expect(VectorStore.load(dir)).rejects.toThrowError(/E_VEC_CORRUPT/);
+  });
+  it('新 bin 配旧 index 且条数相同时拒载（防错位）', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'engram-'));
+    const s1 = new VectorStore(fp);
+    s1.add('a', v(1, 0, 0, 0));
+    await s1.save(dir);
+    const oldIdx = await readFile(join(dir, 'index.json'), 'utf8');
+    const s2 = new VectorStore(fp);
+    s2.add('z', v(0, 0, 0, 1));
+    await s2.save(dir);
+    await writeFile(join(dir, 'index.json'), oldIdx);
+    await expect(VectorStore.load(dir)).rejects.toThrowError(/E_VEC_CORRUPT/);
+  });
+  it('vectors.bin 被截断或加长时拒载', async () => {
+    const s = new VectorStore(fp);
+    s.add('a', v(1, 0, 0, 0));
+    const dir = await mkdtemp(join(tmpdir(), 'engram-'));
+    await s.save(dir);
+    const buf = await readFile(join(dir, 'vectors.bin'));
+    await writeFile(join(dir, 'vectors.bin'), buf.subarray(0, 12));
+    await expect(VectorStore.load(dir)).rejects.toThrowError(/E_VEC_CORRUPT/);
+    await writeFile(join(dir, 'vectors.bin'), Buffer.concat([buf, Buffer.alloc(4)]));
+    await expect(VectorStore.load(dir)).rejects.toThrowError(/E_VEC_CORRUPT/);
   });
   it('add 拷贝向量，外部改动不污染库内数据', () => {
     const s = new VectorStore(fp);
