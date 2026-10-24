@@ -2,7 +2,7 @@
 // 检索管线汇流总闸：三方去重（常驻 > 充能产物 > 高层桶）→ 预算阶梯（降形态 → 整条弃，永不拆半条）→ 按剧情时间排序
 import type { Form, InjectionItem, UnitMap } from './types.js';
 
-export interface AssembleOpts { recallBudget: number /*召回池默认8000*/ }
+export interface AssembleOpts { recallBudget?: number /*召回池默认8000*/ }
 
 export const DEFAULT_RECALL_BUDGET = 8000;
 
@@ -21,7 +21,9 @@ export function assemble(parts: {
   resident: Map<string, Form>;
   clusterItems: InjectionItem[];
   bucketItems: InjectionItem[];
-}, units: UnitMap, opts: AssembleOpts = { recallBudget: DEFAULT_RECALL_BUDGET }): { final: InjectionItem[]; dropped: InjectionItem[] } {
+}, units: UnitMap, opts?: AssembleOpts): { final: InjectionItem[]; dropped: InjectionItem[] } {
+  // opts 逐项取默认：调用方传 {} 时预算不会静默失效
+  const recallBudget = opts?.recallBudget ?? DEFAULT_RECALL_BUDGET;
   // 1) 按 id 合并：每 id 一条，形态取最高；reason 取最高优先来源里最高形态的首条
   const merged = new Map<string, Merged>();
   let order = 0;
@@ -57,22 +59,22 @@ export function assemble(parts: {
   const dropped: InjectionItem[] = [];
   const out = new Map<string, InjectionItem>(live.map(m => [m.id, { id: m.id, form: m.form, tokens: m.tokens, reason: m.reason }]));
   let total = live.reduce((s, m) => s + m.tokens, 0);
-  if (total > opts.recallBudget) {
+  if (total > recallBudget) {
     // 价值降序：src 小者高 → key 者高 → tokens 小者高 → 先出现者高；从末尾（最低）开始处理
     const byValue = [...live].sort((a, b) =>
       a.src - b.src || Number(b.key) - Number(a.key) || a.tokens - b.tokens || a.order - b.order);
     for (const m of byValue.reverse()) {
-      if (total <= opts.recallBudget) break;
+      if (total <= recallBudget) break;
       const cur = out.get(m.id)!;
       const u = units.get(m.id);
       const degradable = u !== undefined && u.kind !== 'slice';
-      while (degradable && total > opts.recallBudget && DOWN[cur.form]) {
+      while (degradable && total > recallBudget && DOWN[cur.form]) {
         const f = DOWN[cur.form]!;
         total += u!.tokens[f] - cur.tokens;
         cur.form = f;
         cur.tokens = u!.tokens[f];
       }
-      if (total > opts.recallBudget) {
+      if (total > recallBudget) {
         total -= cur.tokens;
         out.delete(m.id);
         dropped.push({ id: m.id, form: m.form, tokens: m.tokens, reason: m.reason });

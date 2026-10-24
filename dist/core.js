@@ -652,20 +652,559 @@ var BM25Index = class _BM25Index {
     if (!this.anchorsById.has(id)) this.ids.delete(id);
   }
 };
+
+// src/core/retrieval/fuse.ts
+var SOURCES = ["bm25", "vec"];
+function rrfFuse(lists, opts) {
+  const k = opts?.k ?? 60;
+  if (!Number.isFinite(k) || k < 0) throw new EngramError("E_FUSE_K", `RRF k \u5FC5\u987B\u662F\u975E\u8D1F\u6709\u9650\u6570\uFF0C\u6536\u5230 ${k}`);
+  if (lists.length > SOURCES.length) {
+    throw new EngramError("E_FUSE_LISTS", `RRF \u6700\u591A\u878D\u5408 ${SOURCES.length} \u8DEF\uFF08bm25, vec\uFF09\uFF0C\u6536\u5230 ${lists.length} \u8DEF`);
+  }
+  const acc = /* @__PURE__ */ new Map();
+  lists.forEach((list, li) => {
+    const src = SOURCES[li];
+    const seen = /* @__PURE__ */ new Set();
+    list.forEach((item2, idx) => {
+      if (seen.has(item2.id)) return;
+      seen.add(item2.id);
+      const add = 1 / (k + idx + 1);
+      const cur = acc.get(item2.id);
+      if (cur) {
+        cur.score += add;
+        cur.sources.push(src);
+      } else {
+        acc.set(item2.id, { score: add, sources: [src], order: acc.size });
+      }
+    });
+  });
+  return [...acc.entries()].sort((a, b) => b[1].score - a[1].score || a[1].order - b[1].order).map(([id, v]) => ({ id, score: v.score, sources: v.sources }));
+}
+function markAnchors(cands, anchorHitIds) {
+  return cands.map((c) => {
+    const out = { ...c, sources: [...c.sources] };
+    if (anchorHitIds.has(c.id)) out.anchorHit = true;
+    return out;
+  });
+}
+
+// src/core/retrieval/weight.ts
+function applyWeights(cands, meta, opts) {
+  const atTagBoost = opts?.atTagBoost ?? 1.2;
+  const atPulseBoost = opts?.atPulseBoost ?? 1.5;
+  const importanceFactor = opts?.importanceFactor ?? 0.02;
+  const echoDecay = opts?.echoDecay ?? 0.6;
+  const out = [];
+  const present = /* @__PURE__ */ new Set();
+  for (const c of cands) {
+    present.add(c.id);
+    const atMul = meta.atPulsed.has(c.id) ? atPulseBoost : meta.atTagged.has(c.id) ? atTagBoost : 1;
+    const impMul = 1 + (meta.importance.get(c.id) ?? 0) * importanceFactor;
+    const natural = c.score * atMul * impMul;
+    const prev = meta.prevSelected.get(c.id);
+    const score = prev === void 0 ? natural : Math.max(natural, prev * echoDecay);
+    out.push({ ...c, sources: [...c.sources], score });
+  }
+  for (const [id, prev] of meta.prevSelected) {
+    if (present.has(id)) continue;
+    out.push({ id, score: prev * echoDecay, sources: [] });
+  }
+  return out.sort((a, b) => b.score - a.score);
+}
+
+// src/core/retrieval/cliff.ts
+function gapStrength(a, b, ratio, margin) {
+  let rs;
+  if (a <= 0) rs = 0;
+  else if (b <= 0) rs = Infinity;
+  else rs = a / b / ratio;
+  const ms = margin !== void 0 && margin > 0 ? (a - b) / margin : 0;
+  return Math.max(rs, ms);
+}
+function detectCliff(sorted, opts) {
+  const ratio = opts?.ratio ?? 1.5;
+  const maxLead = opts?.maxLead ?? 3;
+  const margin = opts?.margin;
+  const minScore = opts?.minScore;
+  const n = sorted.length;
+  if (n === 0) return 0;
+  let k = 0;
+  if (n === 1) {
+    k = sorted[0] > 0 ? 1 : 0;
+  } else {
+    const gaps = Math.min(maxLead, n - 1);
+    let best = -Infinity;
+    let bestIdx = -1;
+    for (let i = 0; i < gaps; i++) {
+      const s = gapStrength(sorted[i], sorted[i + 1], ratio, margin);
+      if (s > best) {
+        best = s;
+        bestIdx = i;
+      }
+    }
+    if (bestIdx >= 0 && best >= 1) k = bestIdx + 1;
+  }
+  if (k > 0 && minScore !== void 0) {
+    for (let i = 0; i < k; i++) if (sorted[i] < minScore) return 0;
+  }
+  return k;
+}
+function passFloor(score, floor) {
+  return score >= floor;
+}
+
+// src/core/retrieval/charge.ts
+var NODE = 1;
+var CHAPTER = 2;
+var VOLUME = 3;
+function ancestors(id, units) {
+  const out = [];
+  const seen = /* @__PURE__ */ new Set([id]);
+  let p = units.get(id)?.parent ?? null;
+  while (p !== null && !seen.has(p)) {
+    const u = units.get(p);
+    if (!u) break;
+    out.push(u);
+    seen.add(p);
+    p = u.parent;
+  }
+  return out;
+}
+var atLayer = (chain, layer) => chain.find((u) => u.layer === layer);
+var item = (u, form, reason) => u ? [{ id: u.id, form, tokens: u.tokens[form], reason }] : [];
+var isNode = (u) => !!u && u.kind === "unit" && u.layer === NODE;
+function gradeAndCluster(cands, units, opts) {
+  const nodeClusterMin = opts.nodeClusterMin ?? 2;
+  const charge = /* @__PURE__ */ new Map();
+  const add = (id, v) => charge.set(id, (charge.get(id) ?? 0) + v);
+  const sorted = cands.map((c, i) => ({ c, i })).sort((a, b) => b.c.score - a.c.score || a.i - b.i).map((x) => x.c);
+  const chains = /* @__PURE__ */ new Map();
+  for (const c of sorted) {
+    const chain = ancestors(c.id, units);
+    chains.set(c.id, chain);
+    for (const u of chain) add(u.id, c.score);
+  }
+  const direct = [];
+  for (const id of opts.directNodeHits ?? []) {
+    const u = units.get(id);
+    if (!isNode(u)) continue;
+    direct.push(u);
+    add(u.id, 1);
+    for (const a of ancestors(u.id, units)) add(a.id, 1);
+  }
+  const directIds = new Set(direct.map((u) => u.id));
+  const nodeOf = /* @__PURE__ */ new Map();
+  const chapterOf = /* @__PURE__ */ new Map();
+  const nodeHits = /* @__PURE__ */ new Map();
+  const chapterNodes = /* @__PURE__ */ new Map();
+  for (const c of sorted) {
+    const chain = chains.get(c.id);
+    const n = atLayer(chain, NODE);
+    const ch = atLayer(chain, CHAPTER);
+    nodeOf.set(c.id, n);
+    chapterOf.set(c.id, ch);
+    if (n) nodeHits.set(n.id, (nodeHits.get(n.id) ?? 0) + 1);
+    if (n && ch) {
+      if (!chapterNodes.has(ch.id)) chapterNodes.set(ch.id, /* @__PURE__ */ new Set());
+      chapterNodes.get(ch.id).add(n.id);
+    }
+  }
+  for (const u of direct) {
+    nodeHits.set(u.id, (nodeHits.get(u.id) ?? 0) + 1);
+    const ch = atLayer(ancestors(u.id, units), CHAPTER);
+    if (ch) {
+      if (!chapterNodes.has(ch.id)) chapterNodes.set(ch.id, /* @__PURE__ */ new Set());
+      chapterNodes.get(ch.id).add(u.id);
+    }
+  }
+  const nodeClustered = (id) => directIds.has(id) || (nodeHits.get(id) ?? 0) >= nodeClusterMin;
+  const chapterClustered = (id) => (chapterNodes.get(id)?.size ?? 0) >= 2;
+  const k = detectCliff(sorted.map((c) => c.score), opts.cliff);
+  const slices = sorted.map((c, idx) => {
+    let grade = "mention";
+    const n = nodeOf.get(c.id), ch = chapterOf.get(c.id);
+    if (idx < k) grade = "precise";
+    else if (n && nodeClustered(n.id)) grade = "nodeCluster";
+    else if (ch && chapterClustered(ch.id)) grade = "chapterCluster";
+    return { id: c.id, grade, score: c.score };
+  });
+  const upgrades = [];
+  const nodeOrder = [];
+  const chapterOrder = [];
+  for (const s of slices) {
+    const chain = chains.get(s.id);
+    if (s.grade === "precise") {
+      const reason = `precise:${s.id}`;
+      upgrades.push(
+        ...item(nodeOf.get(s.id), "body", reason),
+        ...item(chapterOf.get(s.id), "summary", reason),
+        ...item(atLayer(chain, VOLUME), "summary", reason)
+      );
+    } else if (s.grade === "nodeCluster") {
+      const n = nodeOf.get(s.id);
+      if (!nodeOrder.includes(n)) nodeOrder.push(n);
+    } else if (s.grade === "chapterCluster") {
+      const ch = chapterOf.get(s.id);
+      if (!chapterOrder.includes(ch)) chapterOrder.push(ch);
+    }
+  }
+  const sliceNodes = new Set([...nodeOf.values()].filter((n) => n).map((n) => n.id));
+  for (const u of direct) if (!sliceNodes.has(u.id)) nodeOrder.push(u);
+  for (const n of nodeOrder) {
+    const chain = ancestors(n.id, units);
+    const reason = `nodeCluster:${n.id}`;
+    upgrades.push(
+      ...item(n, "body", reason),
+      ...item(atLayer(chain, CHAPTER), "summary", reason),
+      ...item(atLayer(chain, VOLUME), "summary", reason)
+    );
+  }
+  for (const ch of chapterOrder) {
+    const reason = `chapterCluster:${ch.id}`;
+    upgrades.push(
+      ...item(ch, "body", reason),
+      ...item(atLayer(ancestors(ch.id, units), VOLUME), "summary", reason)
+    );
+  }
+  return { slices, upgrades, charge };
+}
+
+// src/core/retrieval/bucket.ts
+var MIN_LAYER = 2;
+function bucketSelect(unitCands, units, opts) {
+  const perLayerMax = opts.perLayerMax ?? 2;
+  const buckets = /* @__PURE__ */ new Map();
+  unitCands.forEach((c, i) => {
+    const u = units.get(c.id);
+    if (!u || u.kind !== "unit" || u.layer < MIN_LAYER) return;
+    let b = buckets.get(u.layer);
+    if (!b) {
+      b = [];
+      buckets.set(u.layer, b);
+    }
+    b.push({ u, score: c.score, i });
+  });
+  const picks = [];
+  const layers = [...buckets.keys()].sort((a, b) => b - a);
+  for (const layer of layers) {
+    const passed = buckets.get(layer).filter((x) => passFloor(x.score, opts.floor)).sort((a, b) => b.score - a.score || a.i - b.i);
+    const k = detectCliff(passed.map((x) => x.score), opts.cliff);
+    passed.slice(0, Math.max(0, perLayerMax)).forEach((x, idx) => picks.push({ u: x.u, score: x.score, lead: idx < k }));
+  }
+  const picked = new Map(picks.map((p) => [p.u.id, p]));
+  const absorbed = (self) => {
+    const u = self.u;
+    const seen = /* @__PURE__ */ new Set([u.id]);
+    let p = u.parent;
+    while (p !== null && !seen.has(p)) {
+      const hit = picked.get(p);
+      if (hit && hit.u.layer > u.layer && (hit.lead || !self.lead)) return true;
+      const a = units.get(p);
+      if (!a) return false;
+      seen.add(p);
+      p = a.parent;
+    }
+    return false;
+  };
+  const requests = [];
+  const chargeSignals = [];
+  for (const p of picks) {
+    if (absorbed(p)) continue;
+    const form = p.lead ? "body" : "summary";
+    requests.push({
+      id: p.u.id,
+      form,
+      tokens: p.u.tokens[form],
+      reason: `bucket:${p.lead ? "lead" : "graze"}:${p.u.id}`
+    });
+    if (!p.lead) chargeSignals.push(p.u.id);
+  }
+  return { requests, chargeSignals };
+}
+
+// src/core/retrieval/assemble.ts
+var DEFAULT_RECALL_BUDGET = 8e3;
+var RANK = { title: 0, summary: 1, body: 2 };
+var DOWN = { body: "summary", summary: "title" };
+var KEY_RE = /(^|:)(precise|lead)(:|$)/;
+function assemble(parts, units, opts) {
+  const recallBudget = opts?.recallBudget ?? DEFAULT_RECALL_BUDGET;
+  const merged = /* @__PURE__ */ new Map();
+  let order = 0;
+  const sources = [parts.clusterItems, parts.bucketItems];
+  sources.forEach((list, src) => {
+    for (const it of list) {
+      const key = KEY_RE.test(it.reason);
+      const m = merged.get(it.id);
+      if (!m) {
+        merged.set(it.id, { id: it.id, form: it.form, tokens: it.tokens, reason: it.reason, src, key, order: order++ });
+        continue;
+      }
+      m.key ||= key;
+      if (RANK[it.form] > RANK[m.form]) {
+        m.form = it.form;
+        m.tokens = it.tokens;
+        if (src === m.src) m.reason = it.reason;
+      }
+    }
+  });
+  const live = [];
+  for (const m of merged.values()) {
+    const r = parts.resident.get(m.id);
+    if (r !== void 0 && RANK[r] >= RANK[m.form]) continue;
+    const u = units.get(m.id);
+    if (u) m.tokens = u.tokens[m.form];
+    live.push(m);
+  }
+  const dropped = [];
+  const out = new Map(live.map((m) => [m.id, { id: m.id, form: m.form, tokens: m.tokens, reason: m.reason }]));
+  let total = live.reduce((s, m) => s + m.tokens, 0);
+  if (total > recallBudget) {
+    const byValue = [...live].sort((a, b) => a.src - b.src || Number(b.key) - Number(a.key) || a.tokens - b.tokens || a.order - b.order);
+    for (const m of byValue.reverse()) {
+      if (total <= recallBudget) break;
+      const cur = out.get(m.id);
+      const u = units.get(m.id);
+      const degradable = u !== void 0 && u.kind !== "slice";
+      while (degradable && total > recallBudget && DOWN[cur.form]) {
+        const f = DOWN[cur.form];
+        total += u.tokens[f] - cur.tokens;
+        cur.form = f;
+        cur.tokens = u.tokens[f];
+      }
+      if (total > recallBudget) {
+        total -= cur.tokens;
+        out.delete(m.id);
+        dropped.push({ id: m.id, form: m.form, tokens: m.tokens, reason: m.reason });
+      }
+    }
+  }
+  const kept = live.filter((m) => out.has(m.id));
+  const withTs = kept.filter((m) => units.get(m.id)?.ts !== void 0);
+  const noTs = kept.filter((m) => units.get(m.id)?.ts === void 0);
+  withTs.sort((a, b) => {
+    const ta = units.get(a.id).ts, tb = units.get(b.id).ts;
+    return ta < tb ? -1 : ta > tb ? 1 : a.order - b.order;
+  });
+  return { final: [...withTs, ...noTs].map((m) => out.get(m.id)), dropped };
+}
+
+// src/core/retrieval/ppr.ts
+var PPR_WEIGHTS_SOLO = Object.freeze({
+  semantic: 0.25,
+  event: 0.25,
+  entity: 0.25,
+  location: 0.15,
+  pair: 0.1,
+  floor: 0
+});
+var PPR_WEIGHTS_ENSEMBLE = Object.freeze({
+  semantic: 0.25,
+  event: 0.25,
+  entity: 0.25,
+  location: 0.1,
+  pair: 0.15,
+  floor: 0
+});
+var DEFAULT_WINDOW = 80;
+function jaccard(a, b) {
+  if (a.size === 0 || b.size === 0) return 0;
+  let inter = 0;
+  for (const x of a) if (b.has(x)) inter++;
+  return inter / (a.size + b.size - inter);
+}
+function pairsOf(chars) {
+  const u = [...new Set(chars)].sort();
+  const out = /* @__PURE__ */ new Set();
+  for (let i = 0; i < u.length; i++) for (let j = i + 1; j < u.length; j++) out.add(`${u[i]}\0${u[j]}`);
+  return out;
+}
+var entitiesOf = (n) => /* @__PURE__ */ new Set([...n.anchors, ...n.tags]);
+function edgeWeight(a, b, vecSim, w, window = DEFAULT_WINDOW) {
+  return edgeWeightPre(prep(a), prep(b), vecSim, w, window);
+}
+var prep = (n) => ({ n, ents: entitiesOf(n), pairs: pairsOf(n.characters), events: new Set(n.eventIds ?? []) });
+function edgeWeightPre(a, b, vecSim, w, window) {
+  let s = 0;
+  if (w.semantic) s += w.semantic * Math.max(0, vecSim(a.n.id, b.n.id));
+  if (w.event) {
+    for (const e of a.events) if (b.events.has(e)) {
+      s += w.event;
+      break;
+    }
+  }
+  if (w.entity) s += w.entity * jaccard(a.ents, b.ents);
+  if (w.location && a.n.location !== void 0 && a.n.location === b.n.location) s += w.location;
+  if (w.pair) s += w.pair * jaccard(a.pairs, b.pairs);
+  if (w.floor && a.n.floor !== void 0 && b.n.floor !== void 0 && window > 0) {
+    s += w.floor * Math.max(0, 1 - Math.abs(a.n.floor - b.n.floor) / window);
+  }
+  return s;
+}
+function pprExpand(seeds, nodes, vecSim, opts) {
+  const alpha = opts?.alpha ?? 0.15;
+  const maxAdd = opts?.maxAdd ?? 3;
+  const simFloor = opts?.simFloor ?? 0;
+  const window = opts?.window ?? DEFAULT_WINDOW;
+  const maxIter = opts?.maxIter ?? 50;
+  const tol = opts?.tol ?? 1e-6;
+  const base = opts?.profile === "ensemble" ? PPR_WEIGHTS_ENSEMBLE : PPR_WEIGHTS_SOLO;
+  const w = { ...base };
+  for (const [k, v] of Object.entries(opts?.channelWeights ?? {})) {
+    if (v !== void 0) w[k] = v;
+  }
+  if (maxAdd <= 0) return [];
+  const list = [];
+  const index = /* @__PURE__ */ new Map();
+  for (const n2 of nodes) if (!index.has(n2.id)) {
+    index.set(n2.id, list.length);
+    list.push(n2);
+  }
+  const n = list.length;
+  const p = new Float64Array(n);
+  const seedIdx = [];
+  for (const [id] of seeds) {
+    const i = index.get(id);
+    if (i !== void 0 && !seedIdx.includes(i)) seedIdx.push(i);
+  }
+  if (seedIdx.length === 0) return [];
+  let mass = 0;
+  for (const i of seedIdx) {
+    const v = Math.max(0, seeds.get(list[i].id));
+    p[i] = v;
+    mass += v;
+  }
+  if (mass > 0) for (const i of seedIdx) p[i] /= mass;
+  else for (const i of seedIdx) p[i] = 1 / seedIdx.length;
+  const pre = list.map(prep);
+  const adj = list.map(() => []);
+  const deg = new Float64Array(n);
+  for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+    const ew = edgeWeightPre(pre[i], pre[j], vecSim, w, window);
+    if (ew > 0) {
+      adj[i].push([j, ew]);
+      adj[j].push([i, ew]);
+      deg[i] += ew;
+      deg[j] += ew;
+    }
+  }
+  let r = Float64Array.from(p);
+  for (let it = 0; it < maxIter; it++) {
+    const next = new Float64Array(n);
+    let dangling = 0;
+    for (let i = 0; i < n; i++) {
+      const ri = r[i];
+      if (ri === 0) continue;
+      if (deg[i] === 0) {
+        dangling += ri;
+        continue;
+      }
+      for (const [j, ew] of adj[i]) next[j] += (1 - alpha) * ri * ew / deg[i];
+    }
+    let diff = 0;
+    for (let i = 0; i < n; i++) {
+      next[i] += (alpha + (1 - alpha) * dangling) * p[i];
+      diff += Math.abs(next[i] - r[i]);
+    }
+    r = next;
+    if (diff < tol) break;
+  }
+  const seedSet = new Set(seedIdx);
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    if (seedSet.has(i) || r[i] <= 0) continue;
+    let best = -Infinity;
+    for (const si of seedIdx) best = Math.max(best, vecSim(list[i].id, list[si].id));
+    if (best < simFloor) continue;
+    out.push({ i, s: r[i] });
+  }
+  return out.sort((a, b) => b.s - a.s || a.i - b.i).slice(0, maxAdd).map((x) => list[x.i].id);
+}
+
+// src/core/retrieval/pipeline.ts
+function applyRerank(cands, rerank, topN) {
+  const n = Math.max(0, topN);
+  const head = cands.slice(0, n);
+  const rest = cands.slice(n);
+  if (head.length === 0) return cands;
+  const scores = rerank(head.map((c) => c.id));
+  const rescored = head.map((c) => {
+    const r = scores.get(c.id);
+    if (r === void 0) return c;
+    return { ...c, score: c.anchorHit ? Math.max(r, c.score) : r };
+  });
+  rescored.sort((a, b) => b.score - a.score);
+  return [...rescored, ...rest];
+}
+function retrieve(input) {
+  const { units, opts = {} } = input;
+  const fused = markAnchors(rrfFuse([input.bm25Results, input.vecResults], { k: opts.fuseK }), input.anchorHitIds);
+  let ranked = applyWeights(fused, input.weightMeta, opts.weight);
+  if (opts.rerank) ranked = applyRerank(ranked, opts.rerank, opts.rerankTopN ?? 20);
+  const sliceCands = [];
+  const unitCands = [];
+  const directNodeHits = /* @__PURE__ */ new Set();
+  for (const c of ranked) {
+    const u = units.get(c.id);
+    if (!u || u.kind === "slice") sliceCands.push(c);
+    else if (u.layer === 1) directNodeHits.add(c.id);
+    else if (u.layer >= 2) unitCands.push(c);
+  }
+  const cliff = opts.cliff ?? {};
+  const cluster = gradeAndCluster(sliceCands, units, { cliff, nodeClusterMin: opts.nodeClusterMin, directNodeHits });
+  const bucket = bucketSelect(unitCands, units, {
+    floor: opts.bucket?.floor ?? 0,
+    cliff: opts.bucket?.cliff ?? cliff,
+    perLayerMax: opts.bucket?.perLayerMax
+  });
+  const sliceItem = (id, reason) => ({ id, form: "body", tokens: units.get(id)?.tokens.body ?? 0, reason });
+  const grades = [...cluster.slices];
+  const clusterItems = [
+    ...cluster.slices.map((s) => sliceItem(s.id, s.grade)),
+    ...cluster.upgrades
+  ];
+  if (input.pprNodes && input.vecSim && cluster.slices.length > 0) {
+    const seeds = new Map(cluster.slices.map((s) => [s.id, s.score]));
+    for (const id of pprExpand(seeds, input.pprNodes, input.vecSim, opts.ppr)) {
+      grades.push({ id, grade: "mention", score: 0 });
+      clusterItems.push(sliceItem(id, "ppr"));
+    }
+  }
+  const { final, dropped } = assemble(
+    { resident: input.resident, clusterItems, bucketItems: bucket.requests },
+    units,
+    { recallBudget: opts.recallBudget }
+  );
+  return { final, dropped, grades };
+}
 export {
   BM25Index,
+  DEFAULT_RECALL_BUDGET,
   EngramError,
   LIB_KINDS,
+  PPR_WEIGHTS_ENSEMBLE,
+  PPR_WEIGHTS_SOLO,
   VectorStore,
   applyDeltas,
+  applyWeights,
+  assemble,
   bigramTokenizer,
+  bucketSelect,
   createLibrary,
+  detectCliff,
+  edgeWeight,
   fnv1a32,
+  gradeAndCluster,
   listLibraries,
+  markAnchors,
   normalize,
   openLibrary,
   parseDeltaLine,
+  passFloor,
+  pprExpand,
+  retrieve,
   rollbackView,
+  rrfFuse,
   serializeDelta,
   topK,
   uuidv4,

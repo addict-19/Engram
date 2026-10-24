@@ -19,6 +19,9 @@
 - 金字塔充能与聚集升级 `gradeAndCluster`：切片分数沿 parent 链累加为各祖先充能，`directNodeHits` 中的节额外 +1 充能（自身与祖先并账）并直接触发节内聚集；切片按 precise（断崖前）> nodeCluster（同节命中 ≥ nodeClusterMin 默认 2，或节被直接命中）> chapterCluster（同章跨 ≥2 个节，直接命中节也计入）> mention 互斥归档；升级产物按档位表输出（精准/节聚集：节 body + 章 summary + 卷 summary；章聚集：章 body + 卷 summary），precise 按切片、节/章聚集按单元各出一组，祖先缺层跳过不报错，直接命中但无命中切片的节仍产出节聚集升级；parent 断链/成环安全终止。
 - 高层直接命中桶 `bucketSelect`：章/卷/部及更高单元（layer≥2，节与切片由管线层分流不进本函数）按 layer 分层分桶，桶内降序、低于 floor 舍弃，对过线序列跑 `detectCliff`，断点前各条（领先档）请求 body，其余过线条目（擦线档）请求 summary 并记入 chargeSignals；每层 body+summary 合计不超过 perLayerMax（默认 2，超额按分数截掉，不产出也不计充能）；包含吸收逐级：入选单元的祖先链上有更高层、且请求形态不低于它（body > summary）的入选单元即删除（部吞卷、卷吞章、隔层同样吞，不补位），擦线祖先（summary）不吞领先后代（body），两条共存，被吞者不进 chargeSignals；reason 记 `bucket:lead:<id>` / `bucket:graze:<id>`；输出按层高到低、层内分数降序；parent 断链/成环安全终止。
 - 三方去重与预算装配 `assemble`：充能产物（clusterItems）与高层桶（bucketItems）先按 id 合并为每单元一条（形态取最高 body>summary>title，同单元 body/summary 并存只留 body，reason 记最高优先来源），再与常驻比对（常驻已有形态 ≥ 合并形态即删，去重删除不计 dropped）；总 tokens 超 recallBudget（默认 8000）时按价值从低到高逐条先降形态（body→summary→title，tokens 换 UnitMap 对应值，切片与孤儿不可降）、降完仍超整条弃入 dropped，永不拆半条；价值序 = cluster 来源 > bucket 来源 → 同源内 reason 含 precise/lead 者优先 → tokens 小者优先 → 先出现者优先；final 按 UnitMap 的 ts 升序（缺 ts/孤儿排尾保持相对序），不改入参。
+- PPR 临时图扩散 `pprExpand`：以本轮切片候选为种子（分数归一化为个性化向量），只在调用方传入的 nodes 上现建带权无向图、返回即丢；边权为六通道加权和——语义（注入的 vecSim，负值截 0）/ 同事件（共享任一 eventId）/ 实体（anchors∪tags 的 Jaccard）/ 同地点 / 互动对（角色两两成对的 Jaccard）/ 楼层（窗口默认 80 线性衰减）；双档预设 `PPR_WEIGHTS_SOLO`（单人卡，默认：0.25/0.25/0.25/地点 0.15/互动对 0.10/楼层 0）与 `PPR_WEIGHTS_ENSEMBLE`（多人卡：地点 0.10/互动对 0.15），`profile` 选档、`channelWeights` 逐项覆盖；α=0.15 幂迭代（至多 50 轮、L1 变化 <1e-6 提前停），无边节点质量回跳种子；输出非种子、分 >0、与任一种子 vecSim ≥ simFloor（默认 0）的补充 id，至多 maxAdd（默认 3）条。`edgeWeight` 单独导出便于核对。
+- 检索管线总装 `retrieve`：rrfFuse → markAnchors → applyWeights → 可选 rerank（只送前 rerankTopN 默认 20 条，锚点命中者取 max(rerank 分, 原分)，其余用 rerank 分，段外候选原分接在其后）→ 按 units 分流（切片与不在 units 的孤儿进充能流；layer=1 节转 directNodeHits；layer≥2 进高层桶）→ gradeAndCluster + bucketSelect → PPR 补条（提供 pprNodes 与 vecSim 时启用，补充切片以 mention 档、reason `ppr` 并入 clusterItems，预算内才进）→ assemble；切片本体注入项 form=body、tokens 取 UnitMap（孤儿 0）、reason=档位；返回 `{ final, dropped, grades }`。加权层元数据类型抽出为 `WeightMeta`。
+- core barrel 补齐 M2 检索管线全部导出，dist/core.js 同步重建。
 
 ### Changed
 - 错误约定统一：错误码只放在 `.code`，message 不再带 `CODE: ` 前缀（vectorStore 的 `E_VEC_*`、cosine 的 `E_COS_DIM` 已去前缀）；库与向量存储的 IO 包装合并为 `errors.ts` 的 `moduleIO(fn, code, modulePrefix)`（本模块错误同对象透传，其余转码、原错误留 cause），错误码与抛错时机不变。
@@ -28,3 +31,4 @@
 - 库：appendDelta 写盘前校验 lib/op 合法且能通过 round-trip 解析，不合法抛 `E_LIB_DELTA`，不再出现写入成功、读盘时却被静默丢弃的 delta。
 - 库：openLibrary 校验 meta.json 的 id 与目录名一致，不符抛 `E_LIB_ID_MISMATCH`（手动复制/改名库目录导致的 id 分叉），listLibraries 跳过此类目录继续列出其余库；applyDeltas 内部改用无原型对象，实体 id 为 `__proto__` 时不再改写结果原型，id 为 `constructor`/`toString` 等继承键名时 update 不再凭空造实体（getState 返回值随之为无原型对象）。
 - 测试护栏：crypto 零引用检查扩展到 src/core 全部源码与 dist/core.js；fnv1a32 加已知向量断言，锁定落盘哈希算法。
+- 装配：`assemble` 的 opts 改为逐项取默认，调用方传 `{}` 或省略时召回池预算按默认 8000 生效，不再静默失效。

@@ -242,3 +242,12 @@ describe('assemble 时间排序与容错', () => {
     for (const x of r.final) expect(clusterItems.concat(bucketItems)).not.toContain(x);
   });
 });
+
+describe('assemble opts 逐项默认', () => {
+  it('opts 传 {} 时 recallBudget 仍按默认 8000 生效（不静默失效）', () => {
+    const m = new Map([['X', U('X', 2, [10, 100, 9000], '001')]]);
+    const parts = { resident: none, clusterItems: [I('X', 'body', 9000, 'chapterCluster:X')], bucketItems: [] };
+    expect(fmt(assemble(parts, m, {}).final)).toEqual(['X/summary/100/chapterCluster:X']);
+    expect(fmt(assemble(parts, m).final)).toEqual(['X/summary/100/chapterCluster:X']);
+  });
+});

@@ -13,11 +13,13 @@ export interface WeightOpts {
 // 回响规则：candScore = max(本轮自然加权分, 上轮分×echoDecay)——自然分高时绝不被回响拉低；
 // 上轮入选但本轮无自然候选的 id 以保底分补入（sources 空、无 anchorHit，不吃 @/importance 加成）；
 // 输出按分数降序，同分按输入顺序稳定（补入者排在原候选之后、按 prevSelected 迭代顺序）
-export function applyWeights(cands: Candidate[], meta: {
+export interface WeightMeta {
   atTagged: Set<string>; atPulsed: Set<string>;
   importance: Map<string, number>;
   prevSelected: Map<string, number>;
-}, opts?: WeightOpts): Candidate[] {
+}
+
+export function applyWeights(cands: Candidate[], meta: WeightMeta, opts?: WeightOpts): Candidate[] {
   const atTagBoost = opts?.atTagBoost ?? 1.2;
   const atPulseBoost = opts?.atPulseBoost ?? 1.5;
   const importanceFactor = opts?.importanceFactor ?? 0.02;
