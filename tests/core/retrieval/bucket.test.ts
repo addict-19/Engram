@@ -160,14 +160,38 @@ describe('bucketSelect：包含吸收逐级', () => {
     expect(r.chargeSignals).toEqual([]);
   });
 
-  it('擦线档祖先同样吞掉领先档后代（保留高层请求）', () => {
-    // 卷层 V1=5、V2=4.5 无断崖 → 两卷都擦线；章层 C1 领先被 V1 吞
+  it('擦线祖先不吞领先后代：卷 summary 与章 body 共存', () => {
+    // 卷层 V1=5、V2=4.5 无断崖 → 两卷都擦线；章层 C1 单条领先（body）→ 不被 V1 吞
     const r = bucketSelect([C('V1', 5), C('V2', 4.5), C('C1', 10)], tree(), opts());
+    expect(items(r)).toEqual([
+      'V1/summary/312/bucket:graze:V1',
+      'V2/summary/322/bucket:graze:V2',
+      'C1/body/213/bucket:lead:C1',
+    ]);
+    expect(r.chargeSignals).toEqual(['V1', 'V2']);   // 卷擦线仍计充能；章领先本就不计
+  });
+
+  it('领先祖先吞领先后代（回归）', () => {
+    const r = bucketSelect([C('V1', 5), C('C1', 10)], tree(), opts());
+    expect(items(r)).toEqual(['V1/body/313/bucket:lead:V1']);
+    expect(r.chargeSignals).toEqual([]);
+  });
+
+  it('擦线祖先吞擦线后代', () => {
+    // 卷层 V1/V2 都擦线；章层 C1=10、C2=9 无断崖都擦线 → C1/C2 被 V1 吞
+    const r = bucketSelect([C('V1', 5), C('V2', 4.5), C('C1', 10), C('C2', 9)], tree(), opts());
     expect(items(r)).toEqual([
       'V1/summary/312/bucket:graze:V1',
       'V2/summary/322/bucket:graze:V2',
     ]);
     expect(r.chargeSignals).toEqual(['V1', 'V2']);
+  });
+
+  it('逐级取任一满足条件的祖先：部领先吞擦线卷下的领先章', () => {
+    // 部 P 单条领先；卷层 V1/V2 擦线（均被 P 吞）；章 C1 领先 → V1 擦线不能吞，但 P 领先可吞
+    const r = bucketSelect([C('P', 3), C('V1', 5), C('V2', 4.5), C('C1', 10)], tree(), opts());
+    expect(items(r)).toEqual(['P/body/403/bucket:lead:P']);
+    expect(r.chargeSignals).toEqual([]);
   });
 
   it('被限额截掉的高层条目不参与吸收', () => {
