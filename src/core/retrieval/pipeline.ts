@@ -39,7 +39,10 @@ export interface RetrieveInput {
   opts?: RetrieveOpts;
 }
 
-export interface RetrieveResult { final: InjectionItem[]; dropped: InjectionItem[]; grades: GradedSlice[] }
+export interface RetrieveResult {
+  final: InjectionItem[]; dropped: InjectionItem[]; grades: GradedSlice[];
+  chargeSignals: string[];   // bucketSelect 擦线单元 id，原样透传（供跨轮充能 / 面板）
+}
 
 // 重排：只对前 topN 条调用；anchorHit 者取 max(rerank分, 原分)（锚点免死金牌），其余用 rerank 分；
 // rerank 未返回分的条目保留原分。重排段内按新分降序（同分稳定），段外候选原序接在其后。
@@ -69,14 +72,15 @@ export function retrieve(input: RetrieveInput): RetrieveResult {
   if (opts.rerank) ranked = applyRerank(ranked, opts.rerank, opts.rerankTopN ?? 20);
 
   // 4. 分流：切片（含不在 units 的孤儿）/ 节 → directNodeHits / 章及以上 → 高层桶
+  // 兜底：kind='unit' 但 layer 非法（<1、NaN 等）的候选不静默丢弃，按孤儿语义并入切片流容错
   const sliceCands: Candidate[] = [];
   const unitCands: Candidate[] = [];
   const directNodeHits = new Set<string>();
   for (const c of ranked) {
     const u = units.get(c.id);
-    if (!u || u.kind === 'slice') sliceCands.push(c);
-    else if (u.layer === 1) directNodeHits.add(c.id);
-    else if (u.layer >= 2) unitCands.push(c);
+    if (u && u.kind !== 'slice' && u.layer === 1) directNodeHits.add(c.id);
+    else if (u && u.kind !== 'slice' && u.layer >= 2) unitCands.push(c);
+    else sliceCands.push(c);
   }
 
   // 5. 充能聚集 + 高层桶
@@ -97,9 +101,11 @@ export function retrieve(input: RetrieveInput): RetrieveResult {
   ];
 
   // 6. PPR 补条：种子=最终切片候选；补充 id 以 mention 档并入（是否入选交给 assemble 预算）
+  // 只有切片（含不在 units 的孤儿）能作补条：unit 类节点在建图前就滤掉，不占 maxAdd 名额
   if (input.pprNodes && input.vecSim && cluster.slices.length > 0) {
     const seeds = new Map(cluster.slices.map(s => [s.id, s.score]));
-    for (const id of pprExpand(seeds, input.pprNodes, input.vecSim, opts.ppr)) {
+    const sliceNodes = input.pprNodes.filter(n => { const u = units.get(n.id); return !u || u.kind === 'slice'; });
+    for (const id of pprExpand(seeds, sliceNodes, input.vecSim, opts.ppr)) {
       grades.push({ id, grade: 'mention', score: 0 });
       clusterItems.push(sliceItem(id, 'ppr'));
     }
@@ -110,5 +116,5 @@ export function retrieve(input: RetrieveInput): RetrieveResult {
     { resident: input.resident, clusterItems, bucketItems: bucket.requests },
     units, { recallBudget: opts.recallBudget },
   );
-  return { final, dropped, grades };
+  return { final, dropped, grades, chargeSignals: [...bucket.chargeSignals] };
 }

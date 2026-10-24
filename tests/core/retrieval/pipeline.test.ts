@@ -68,6 +68,23 @@ describe('retrieve 分流', () => {
     expect(r.final.map(x => x.id)).not.toContain('c');
   });
 
+  it('kind=unit 但 layer 非法（<1 / NaN）的候选按孤儿并入切片流，不消失', () => {
+    const m = units();
+    m.set('W', U('W', 'unit', 0, null, [2, 20, 200]));
+    m.set('X', U('X', 'unit', Number.NaN, null, [3, 30, 300]));
+    const r = retrieve(base({ units: m, bm25Results: hits('a', 'W', 'X'), vecResults: hits('X', 'W', 'a') }));
+    expect(r.grades.map(g => `${g.id}:${g.grade}`).sort()).toEqual(['W:mention', 'X:mention', 'a:mention']);
+    expect(r.final.map(x => x.id)).toEqual(expect.arrayContaining(['W', 'X']));
+  });
+
+  it('chargeSignals 原样透传 bucketSelect 擦线单元', () => {
+    // 章层 C1、C2：C1 领先（≥1.5 倍）→ body，C2 擦线 → summary 并计充能
+    const r = retrieve(base({ bm25Results: hits('C1', 'C2'), opts: { fuseK: 0 } }));
+    expect(fmt(r.final)).toContain('C2/summary/80/bucket:graze:C2');
+    expect(r.chargeSignals).toEqual(['C2']);
+    expect(retrieve(base({ bm25Results: hits('a') })).chargeSignals).toEqual([]);
+  });
+
   it('不在 units 中的孤儿 id 按切片处理，tokens 记 0', () => {
     const r = retrieve(base({ bm25Results: hits('zz') }));
     expect(fmt(r.final)).toEqual(['zz/body/0/precise']);
@@ -93,6 +110,14 @@ describe('retrieve PPR 补条', () => {
     expect(fmt(r.final)).toContain('b/body/100/ppr');
     expect(r.grades).toContainEqual({ id: 'b', grade: 'mention', score: 0 });
     expect(r.final.map(x => x.id)).not.toContain('c');
+  });
+
+  it('pprNodes 混入 unit 类 id（章）时不进补条，也不占名额', () => {
+    // C2 排在 b 前：与 b 同分时旧逻辑会按 nodes 序选中 C2
+    const mixed: PPRNode[] = [{ id: 'C2', characters: [], anchors: [], tags: [], eventIds: ['e'] }, ...nodes];
+    const r = retrieve(base({ bm25Results: hits('a'), pprNodes: mixed, vecSim: noSim, opts: { ppr: { maxAdd: 1 } } }));
+    expect(r.grades.map(g => g.id)).toEqual(['a', 'b']);
+    expect(r.final.map(x => x.id)).not.toContain('C2');
   });
 
   it('未提供 pprNodes 或 vecSim 时不扩散', () => {

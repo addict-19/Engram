@@ -1146,9 +1146,9 @@ function retrieve(input) {
   const directNodeHits = /* @__PURE__ */ new Set();
   for (const c of ranked) {
     const u = units.get(c.id);
-    if (!u || u.kind === "slice") sliceCands.push(c);
-    else if (u.layer === 1) directNodeHits.add(c.id);
-    else if (u.layer >= 2) unitCands.push(c);
+    if (u && u.kind !== "slice" && u.layer === 1) directNodeHits.add(c.id);
+    else if (u && u.kind !== "slice" && u.layer >= 2) unitCands.push(c);
+    else sliceCands.push(c);
   }
   const cliff = opts.cliff ?? {};
   const cluster = gradeAndCluster(sliceCands, units, { cliff, nodeClusterMin: opts.nodeClusterMin, directNodeHits });
@@ -1165,7 +1165,11 @@ function retrieve(input) {
   ];
   if (input.pprNodes && input.vecSim && cluster.slices.length > 0) {
     const seeds = new Map(cluster.slices.map((s) => [s.id, s.score]));
-    for (const id of pprExpand(seeds, input.pprNodes, input.vecSim, opts.ppr)) {
+    const sliceNodes = input.pprNodes.filter((n) => {
+      const u = units.get(n.id);
+      return !u || u.kind === "slice";
+    });
+    for (const id of pprExpand(seeds, sliceNodes, input.vecSim, opts.ppr)) {
       grades.push({ id, grade: "mention", score: 0 });
       clusterItems.push(sliceItem(id, "ppr"));
     }
@@ -1175,7 +1179,7 @@ function retrieve(input) {
     units,
     { recallBudget: opts.recallBudget }
   );
-  return { final, dropped, grades };
+  return { final, dropped, grades, chargeSignals: [...bucket.chargeSignals] };
 }
 export {
   BM25Index,
