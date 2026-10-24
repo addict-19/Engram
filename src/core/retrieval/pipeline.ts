@@ -25,7 +25,12 @@ export interface RetrieveOpts {
   bucket?: Partial<BucketOpts>;                     // floor 默认 0；cliff 缺省沿用切片 cliff
   ppr?: PPROpts;
   recallBudget?: number;                            // 召回池预算，缺省走 assemble 默认 8000
+  baseFloor?: number;                               // 基础线，默认 0.01：切片/节候选低于此分剔除，桶 floor 缺省也取它
+  maxSlices?: number;                               // 切片本体注入条数上限，默认 10（升级产物/上层单元不占名额）
 }
+
+export const DEFAULT_BASE_FLOOR = 0.01;
+export const DEFAULT_MAX_SLICES = 10;
 
 export interface RetrieveInput {
   bm25Results: Array<{ id: string; score: number }>;
@@ -42,6 +47,7 @@ export interface RetrieveInput {
 export interface RetrieveResult {
   final: InjectionItem[]; dropped: InjectionItem[]; grades: GradedSlice[];
   chargeSignals: string[];   // bucketSelect 擦线单元 id，原样透传（供跨轮充能 / 面板）
+  charge: Map<string, number>; // gradeAndCluster 的祖先充能表，原样透传
 }
 
 // 重排：只对前 topN 条调用；anchorHit 者取 max(rerank分, 原分)（锚点免死金牌），其余用 rerank 分；
@@ -73,21 +79,29 @@ export function retrieve(input: RetrieveInput): RetrieveResult {
 
   // 4. 分流：切片（含不在 units 的孤儿）/ 节 → directNodeHits / 章及以上 → 高层桶
   // 兜底：kind='unit' 但 layer 非法（<1、NaN 等）的候选不静默丢弃，按孤儿语义并入切片流容错
+  // 基础线：切片与节候选低于 baseFloor 剔除（回响衰减跌破此线即自然出局，约 3 轮）；
+  // 纯回响补入（sources 空）的非切片候选不进节/桶路径——切片流的回响补入保留（设计内的保底参赛）
+  const baseFloor = opts.baseFloor ?? DEFAULT_BASE_FLOOR;
   const sliceCands: Candidate[] = [];
   const unitCands: Candidate[] = [];
   const directNodeHits = new Set<string>();
   for (const c of ranked) {
     const u = units.get(c.id);
-    if (u && u.kind !== 'slice' && u.layer === 1) directNodeHits.add(c.id);
-    else if (u && u.kind !== 'slice' && u.layer >= 2) unitCands.push(c);
-    else sliceCands.push(c);
+    const isUnit = !!u && u.kind !== 'slice' && (u.layer === 1 || u.layer >= 2);
+    if (isUnit) {
+      if (c.sources.length === 0) continue;
+      if (u!.layer === 1) { if (c.score >= baseFloor) directNodeHits.add(c.id); }
+      else unitCands.push(c);   // 桶内由 floor（缺省 baseFloor）把关
+    } else if (c.score >= baseFloor) {
+      sliceCands.push(c);
+    }
   }
 
   // 5. 充能聚集 + 高层桶
   const cliff = opts.cliff ?? {};
   const cluster = gradeAndCluster(sliceCands, units, { cliff, nodeClusterMin: opts.nodeClusterMin, directNodeHits });
   const bucket = bucketSelect(unitCands, units, {
-    floor: opts.bucket?.floor ?? 0,
+    floor: opts.bucket?.floor ?? baseFloor,
     cliff: opts.bucket?.cliff ?? cliff,
     perLayerMax: opts.bucket?.perLayerMax,
   });
@@ -95,10 +109,7 @@ export function retrieve(input: RetrieveInput): RetrieveResult {
   const sliceItem = (id: string, reason: string): InjectionItem =>
     ({ id, form: 'body', tokens: units.get(id)?.tokens.body ?? 0, reason });
   const grades: GradedSlice[] = [...cluster.slices];
-  const clusterItems: InjectionItem[] = [
-    ...cluster.slices.map(s => sliceItem(s.id, s.grade)),
-    ...cluster.upgrades,
-  ];
+  const sliceItems: InjectionItem[] = cluster.slices.map(s => sliceItem(s.id, s.grade));
 
   // 6. PPR 补条：种子=最终切片候选；补充 id 以 mention 档并入（是否入选交给 assemble 预算）
   // 只有切片（含不在 units 的孤儿）能作补条：unit 类节点在建图前就滤掉，不占 maxAdd 名额
@@ -107,14 +118,30 @@ export function retrieve(input: RetrieveInput): RetrieveResult {
     const sliceNodes = input.pprNodes.filter(n => { const u = units.get(n.id); return !u || u.kind === 'slice'; });
     for (const id of pprExpand(seeds, sliceNodes, input.vecSim, opts.ppr)) {
       grades.push({ id, grade: 'mention', score: 0 });
-      clusterItems.push(sliceItem(id, 'ppr'));
+      sliceItems.push(sliceItem(id, 'ppr'));
     }
   }
 
-  // 7. 三方去重 + 预算装配
+  // 7. 切片条数上限：sliceItems 已按分数序（档位判定序降序，PPR 补条分 0 排尾），
+  // 在进 assemble 前截前 maxSlices 条，超出者进 dropped、不占预算；
+  // 常驻已有 body 的切片会被 assemble 去重，不计名额
+  const maxSlices = opts.maxSlices ?? DEFAULT_MAX_SLICES;
+  const capDropped: InjectionItem[] = [];
+  const keptSlices: InjectionItem[] = [];
+  let counted = 0;
+  for (const it of sliceItems) {
+    if (input.resident.get(it.id) === 'body') keptSlices.push(it);
+    else if (counted < maxSlices) { keptSlices.push(it); counted++; }
+    else capDropped.push(it);
+  }
+
+  // 8. 三方去重 + 预算装配
   const { final, dropped } = assemble(
-    { resident: input.resident, clusterItems, bucketItems: bucket.requests },
+    { resident: input.resident, clusterItems: [...keptSlices, ...cluster.upgrades], bucketItems: bucket.requests },
     units, { recallBudget: opts.recallBudget },
   );
-  return { final, dropped, grades, chargeSignals: [...bucket.chargeSignals] };
+  return {
+    final, dropped: [...capDropped, ...dropped], grades,
+    chargeSignals: [...bucket.chargeSignals], charge: new Map(cluster.charge),
+  };
 }

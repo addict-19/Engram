@@ -29,6 +29,11 @@ describe('detectCliff', () => {
     expect(detectCliff([0.8, 0.5, 0.48, 0.192, 0.19])).toBe(3);
   });
 
+  it('maxLead=0 时单元素也返回 0（k ≤ maxLead 不变式）', () => {
+    expect(detectCliff([0.9], { maxLead: 0 })).toBe(0);
+    expect(detectCliff([0.9, 0.1], { maxLead: 0 })).toBe(0);
+  });
+
   it('单元素 → 1；空数组 → 0', () => {
     expect(detectCliff([0.42])).toBe(1);
     expect(detectCliff([])).toBe(0);

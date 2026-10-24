@@ -34,7 +34,7 @@ export function detectCliff(sorted: number[], opts?: CliffOpts): number {
 
   let k = 0;
   if (n === 1) {
-    k = sorted[0]! > 0 ? 1 : 0;
+    k = sorted[0]! > 0 && maxLead >= 1 ? 1 : 0;   // 保持 k ≤ maxLead
   } else {
     const gaps = Math.min(maxLead, n - 1);
     let best = -Infinity;

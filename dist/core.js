@@ -730,7 +730,7 @@ function detectCliff(sorted, opts) {
   if (n === 0) return 0;
   let k = 0;
   if (n === 1) {
-    k = sorted[0] > 0 ? 1 : 0;
+    k = sorted[0] > 0 && maxLead >= 1 ? 1 : 0;
   } else {
     const gaps = Math.min(maxLead, n - 1);
     let best = -Infinity;
@@ -1122,6 +1122,8 @@ function pprExpand(seeds, nodes, vecSim, opts) {
 }
 
 // src/core/retrieval/pipeline.ts
+var DEFAULT_BASE_FLOOR = 0.01;
+var DEFAULT_MAX_SLICES = 10;
 function applyRerank(cands, rerank, topN) {
   const n = Math.max(0, topN);
   const head = cands.slice(0, n);
@@ -1141,28 +1143,32 @@ function retrieve(input) {
   const fused = markAnchors(rrfFuse([input.bm25Results, input.vecResults], { k: opts.fuseK }), input.anchorHitIds);
   let ranked = applyWeights(fused, input.weightMeta, opts.weight);
   if (opts.rerank) ranked = applyRerank(ranked, opts.rerank, opts.rerankTopN ?? 20);
+  const baseFloor = opts.baseFloor ?? DEFAULT_BASE_FLOOR;
   const sliceCands = [];
   const unitCands = [];
   const directNodeHits = /* @__PURE__ */ new Set();
   for (const c of ranked) {
     const u = units.get(c.id);
-    if (u && u.kind !== "slice" && u.layer === 1) directNodeHits.add(c.id);
-    else if (u && u.kind !== "slice" && u.layer >= 2) unitCands.push(c);
-    else sliceCands.push(c);
+    const isUnit = !!u && u.kind !== "slice" && (u.layer === 1 || u.layer >= 2);
+    if (isUnit) {
+      if (c.sources.length === 0) continue;
+      if (u.layer === 1) {
+        if (c.score >= baseFloor) directNodeHits.add(c.id);
+      } else unitCands.push(c);
+    } else if (c.score >= baseFloor) {
+      sliceCands.push(c);
+    }
   }
   const cliff = opts.cliff ?? {};
   const cluster = gradeAndCluster(sliceCands, units, { cliff, nodeClusterMin: opts.nodeClusterMin, directNodeHits });
   const bucket = bucketSelect(unitCands, units, {
-    floor: opts.bucket?.floor ?? 0,
+    floor: opts.bucket?.floor ?? baseFloor,
     cliff: opts.bucket?.cliff ?? cliff,
     perLayerMax: opts.bucket?.perLayerMax
   });
   const sliceItem = (id, reason) => ({ id, form: "body", tokens: units.get(id)?.tokens.body ?? 0, reason });
   const grades = [...cluster.slices];
-  const clusterItems = [
-    ...cluster.slices.map((s) => sliceItem(s.id, s.grade)),
-    ...cluster.upgrades
-  ];
+  const sliceItems = cluster.slices.map((s) => sliceItem(s.id, s.grade));
   if (input.pprNodes && input.vecSim && cluster.slices.length > 0) {
     const seeds = new Map(cluster.slices.map((s) => [s.id, s.score]));
     const sliceNodes = input.pprNodes.filter((n) => {
@@ -1171,18 +1177,37 @@ function retrieve(input) {
     });
     for (const id of pprExpand(seeds, sliceNodes, input.vecSim, opts.ppr)) {
       grades.push({ id, grade: "mention", score: 0 });
-      clusterItems.push(sliceItem(id, "ppr"));
+      sliceItems.push(sliceItem(id, "ppr"));
     }
   }
+  const maxSlices = opts.maxSlices ?? DEFAULT_MAX_SLICES;
+  const capDropped = [];
+  const keptSlices = [];
+  let counted = 0;
+  for (const it of sliceItems) {
+    if (input.resident.get(it.id) === "body") keptSlices.push(it);
+    else if (counted < maxSlices) {
+      keptSlices.push(it);
+      counted++;
+    } else capDropped.push(it);
+  }
   const { final, dropped } = assemble(
-    { resident: input.resident, clusterItems, bucketItems: bucket.requests },
+    { resident: input.resident, clusterItems: [...keptSlices, ...cluster.upgrades], bucketItems: bucket.requests },
     units,
     { recallBudget: opts.recallBudget }
   );
-  return { final, dropped, grades, chargeSignals: [...bucket.chargeSignals] };
+  return {
+    final,
+    dropped: [...capDropped, ...dropped],
+    grades,
+    chargeSignals: [...bucket.chargeSignals],
+    charge: new Map(cluster.charge)
+  };
 }
 export {
   BM25Index,
+  DEFAULT_BASE_FLOOR,
+  DEFAULT_MAX_SLICES,
   DEFAULT_RECALL_BUDGET,
   EngramError,
   LIB_KINDS,

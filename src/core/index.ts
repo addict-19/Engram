@@ -27,4 +27,4 @@ export { assemble, DEFAULT_RECALL_BUDGET } from './retrieval/assemble.js';
 export type { PPRNode, PPRChannel, ChannelWeights, PPROpts } from './retrieval/ppr.js';
 export { pprExpand, edgeWeight, PPR_WEIGHTS_SOLO, PPR_WEIGHTS_ENSEMBLE } from './retrieval/ppr.js';
 export type { RetrieveOpts, RetrieveInput, RetrieveResult } from './retrieval/pipeline.js';
-export { retrieve } from './retrieval/pipeline.js';
+export { retrieve, DEFAULT_BASE_FLOOR, DEFAULT_MAX_SLICES } from './retrieval/pipeline.js';

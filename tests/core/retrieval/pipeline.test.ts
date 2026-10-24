@@ -32,13 +32,13 @@ const fmt = (xs: InjectionItem[]) => xs.map(x => `${x.id}/${x.form}/${x.tokens}/
 describe('retrieve rerank 注入', () => {
   it('锚点免死金牌：anchorHit 取 max(rerank分, 原分)，其余用 rerank 分', () => {
     const rerank = () => new Map([['a', 0.001], ['b', 0.01], ['c', 0.005]]);
-    const r = retrieve(base({ bm25Results: hits('a', 'b', 'c'), anchorHitIds: new Set(['a']), opts: { rerank } }));
+    const r = retrieve(base({ bm25Results: hits('a', 'b', 'c'), anchorHitIds: new Set(['a']), opts: { rerank, baseFloor: 0 } }));
     expect(r.grades.map(g => g.id)).toEqual(['a', 'b', 'c']);
     expect(r.grades[0]!.score).toBeCloseTo(1 / 61, 12);
     expect(r.grades[1]!.score).toBe(0.01);
     expect(r.grades[2]!.score).toBe(0.005);
 
-    const r2 = retrieve(base({ bm25Results: hits('a', 'b', 'c'), opts: { rerank } }));
+    const r2 = retrieve(base({ bm25Results: hits('a', 'b', 'c'), opts: { rerank, baseFloor: 0 } }));
     expect(r2.grades.map(g => g.id)).toEqual(['b', 'c', 'a']);
     expect(r2.grades[2]!.score).toBe(0.001);
   });
@@ -139,5 +139,85 @@ describe('retrieve 纯函数', () => {
     const snap = JSON.stringify([input.bm25Results, [...input.anchorHitIds], [...input.units], [...input.resident]]);
     retrieve(input);
     expect(JSON.stringify([input.bm25Results, [...input.anchorHitIds], [...input.units], [...input.resident]])).toBe(snap);
+  });
+});
+
+const prev = (m: Record<string, number>) => ({ ...meta(), prevSelected: new Map(Object.entries(m)) });
+
+describe('retrieve 基础线 baseFloor（默认 0.01）', () => {
+  it('切片候选低于基础线剔除；节/桶候选同线过滤', () => {
+    const rerank = () => new Map([['a', 0.5], ['b', 0.009], ['N2', 0.009], ['C2', 0.009]]);
+    const r = retrieve(base({ bm25Results: hits('a', 'b', 'N2', 'C2'), opts: { rerank } }));
+    expect(r.grades.map(g => g.id)).toEqual(['a']);
+    const ids = r.final.map(x => x.id);
+    expect(ids).not.toContain('b');
+    expect(ids).not.toContain('N2');   // 节候选过不了线 → 不进 directNodeHits
+    expect(ids).not.toContain('C2');   // 桶 floor 缺省取 baseFloor
+  });
+
+  it('bucket.floor 显式传入优先于 baseFloor', () => {
+    const rerank = () => new Map([['C2', 0.009]]);
+    const r = retrieve(base({ bm25Results: hits('C2'), opts: { rerank, bucket: { floor: 0 } } }));
+    expect(r.final.map(x => x.id)).toContain('C2');
+  });
+
+  it('纯回响补入（sources 空）的节/章不进节路径与桶路径', () => {
+    const r = retrieve(base({ weightMeta: prev({ N2: 1, C2: 1 }) }));
+    expect(r.final).toEqual([]);
+    expect(r.chargeSignals).toEqual([]);
+  });
+});
+
+describe('retrieve 回响出局', () => {
+  it('上轮入选、本轮零命中、衰减后跌破基础线 → 彻底出局', () => {
+    const r = retrieve(base({ weightMeta: prev({ a: 0.015 }) }));   // 0.015×0.6 = 0.009 < 0.01
+    expect(r.grades.map(g => g.id)).not.toContain('a');
+    expect(r.final.map(x => x.id)).not.toContain('a');
+  });
+
+  it('衰减后仍过线 → 切片保底参赛生效', () => {
+    const r = retrieve(base({ weightMeta: prev({ a: 0.02 }) }));    // 0.012 ≥ 0.01
+    expect(r.grades.map(g => g.id)).toEqual(['a']);
+    expect(r.final.map(x => x.id)).toContain('a');
+  });
+
+  it('约 3 轮自然出局：双路第一名的切片此后零命中，第 3 轮掉出', () => {
+    const first = retrieve(base({ bm25Results: hits('a'), vecResults: hits('a') }));
+    let score = first.grades[0]!.score;                                // 2/61 ≈ 0.0328
+    const alive: boolean[] = [];
+    for (let round = 1; round <= 4; round++) {
+      const r = retrieve(base({ weightMeta: prev({ a: score }) }));
+      const g = r.grades.find(x => x.id === 'a');
+      alive.push(!!g);
+      if (!g) break;
+      score = g.score;
+    }
+    expect(alive).toEqual([true, true, false]);                        // 0.0197 → 0.0118 → 0.0071 出局
+  });
+});
+
+describe('retrieve 切片条数上限 maxSlices（默认 10）', () => {
+  const twelve = Array.from({ length: 12 }, (_, i) => `o${i + 1}`);   // 孤儿切片，tokens 0，不受预算干扰
+  it('12 条过线切片默认只留 10 条，按分数序留前 10，其余进 dropped', () => {
+    const r = retrieve(base({ bm25Results: hits(...twelve) }));
+    const kept = r.final.map(x => x.id);
+    expect(kept).toHaveLength(10);
+    expect(kept).toEqual(twelve.slice(0, 10));
+    expect(r.dropped.map(x => x.id)).toEqual(['o11', 'o12']);
+  });
+
+  it('上层单元不占名额；可配', () => {
+    const r = retrieve(base({ bm25Results: hits('a', 'c', ...twelve), vecResults: hits('c', 'a'), opts: { maxSlices: 2 } }));
+    const ids = r.final.map(x => x.id);
+    expect(ids.filter(id => units().get(id)?.kind !== 'unit')).toEqual(['a', 'c']);
+    expect(ids).toContain('C1');   // a、c 的升级产物照常注入，不受切片名额限制
+  });
+});
+
+describe('retrieve 透传 charge', () => {
+  it('返回 gradeAndCluster 的充能表', () => {
+    const r = retrieve(base({ bm25Results: hits('a') }));
+    expect(r.charge.get('N1')).toBeCloseTo(1 / 61, 12);
+    expect(r.charge.get('V1')).toBeCloseTo(1 / 61, 12);
   });
 });
