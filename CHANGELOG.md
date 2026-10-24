@@ -20,4 +20,5 @@
 ### Fixed
 - 库：日志条数极多时 openLibrary 不再因展开传参求最大 seq 抛 RangeError；运行中追加失败后，下一次追加先补换行，避免可能残留的半行拼坏新行。
 - 库：appendDelta 写盘前校验 lib/op 合法且能通过 round-trip 解析，不合法抛 `E_LIB_DELTA`，不再出现写入成功、读盘时却被静默丢弃的 delta。
+- 库：openLibrary 校验 meta.json 的 id 与目录名一致，不符抛 `E_LIB_ID_MISMATCH`（手动复制/改名库目录导致的 id 分叉），listLibraries 跳过此类目录继续列出其余库；applyDeltas 内部改用无原型对象，实体 id 为 `__proto__` 时不再改写结果原型，id 为 `constructor`/`toString` 等继承键名时 update 不再凭空造实体（getState 返回值随之为无原型对象）。
 - 测试护栏：crypto 零引用检查扩展到 src/core 全部源码与 dist/core.js；fnv1a32 加已知向量断言，锁定落盘哈希算法。

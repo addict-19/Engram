@@ -68,3 +68,47 @@ describe('parseDeltaLine payload 校验', () => {
     expect(parseDeltaLine(line)).toEqual({ ...base, payload: { title: '戒指' } });
   });
 });
+
+describe('applyDeltas 原型键加固', () => {
+  it('create __proto__：不改结果对象原型，实体作为自有键保留', () => {
+    const out = applyDeltas({}, [d(1, 1, 'create', '__proto__', { title: 'x' })]);
+    expect(Object.hasOwn(out, '__proto__')).toBe(true);
+    expect(Object.keys(out)).toEqual(['__proto__']);
+    expect(out['__proto__']).toMatchObject({ id: '__proto__', title: 'x' });
+    expect(Object.getPrototypeOf(out)).not.toBe(out['__proto__']);
+    expect((out as Record<string, unknown>)['title']).toBeUndefined();
+  });
+  it('update 继承键名（constructor/toString/hasOwnProperty）不凭空造实体', () => {
+    const out = applyDeltas({}, [
+      d(1, 1, 'update', 'constructor', { a: 1 }),
+      d(2, 1, 'update', 'toString', { a: 1 }),
+      d(3, 1, 'update', 'hasOwnProperty', { a: 1 }),
+    ]);
+    expect(Object.keys(out)).toEqual([]);
+  });
+  it('继承键名作 id 时 create→update→delete 全程正常', () => {
+    const out = applyDeltas({}, [
+      d(1, 1, 'create', 'constructor', { n: 1 }),
+      d(2, 1, 'update', 'constructor', { n: 2 }),
+      d(3, 1, 'create', '__proto__', { n: 1 }),
+      d(4, 1, 'update', '__proto__', { n: 3 }),
+    ]);
+    expect(out['constructor']).toMatchObject({ id: 'constructor', n: 2 });
+    expect(out['__proto__']).toMatchObject({ id: '__proto__', n: 3 });
+    const out2 = applyDeltas(out, [d(5, 2, 'delete', '__proto__'), d(6, 2, 'delete', 'constructor')]);
+    expect(Object.keys(out2)).toEqual([]);
+  });
+  it('base 中自有的 __proto__ 实体（如来自快照 JSON.parse）原样保留', () => {
+    const base = JSON.parse('{"__proto__":{"id":"__proto__","n":1}}');
+    const out = applyDeltas(base, [d(1, 1, 'update', '__proto__', { n: 2 })]);
+    expect(Object.keys(out)).toEqual(['__proto__']);
+    expect(out['__proto__']).toMatchObject({ id: '__proto__', n: 2 });
+  });
+  it('payload 内的 __proto__ 键不污染实体原型', () => {
+    const line = JSON.stringify({ seq: 1, floor: 1, ts: 't', lib: 'treasury', op: 'create', id: 'e', payload: JSON.parse('{"__proto__":{"evil":1}}') });
+    const dl = parseDeltaLine(line)!;
+    const out = applyDeltas({}, [dl]);
+    expect((out['e'] as Record<string, unknown>)['evil']).toBeUndefined();
+    expect(({} as Record<string, unknown>)['evil']).toBeUndefined();
+  });
+});

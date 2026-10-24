@@ -15,7 +15,9 @@ export interface Delta {
 export interface Entity { id: string; [k: string]: unknown }
 
 export function applyDeltas(base: Record<string, Entity>, deltas: Delta[]): Record<string, Entity> {
-  const out: Record<string, Entity> = { ...base };
+  // 无原型 map：id 为 "__proto__" 时 create 不会改写结果对象的原型；
+  // id 为 "constructor"/"toString" 等时 update 读不到继承属性，"不存在则跳过"不会被绕过
+  const out: Record<string, Entity> = Object.assign(Object.create(null) as Record<string, Entity>, base);
   for (const dl of deltas) {
     // id 放在 spread 之后：payload 里的 id 字段永远覆盖不了实体 id
     if (dl.op === 'create') out[dl.id] = { ...dl.payload, id: dl.id };

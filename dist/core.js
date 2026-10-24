@@ -48,7 +48,7 @@ async function writeFileAtomic(path, data) {
 
 // src/core/delta.ts
 function applyDeltas(base, deltas) {
-  const out = { ...base };
+  const out = Object.assign(/* @__PURE__ */ Object.create(null), base);
   for (const dl of deltas) {
     if (dl.op === "create") out[dl.id] = { ...dl.payload, id: dl.id };
     else if (dl.op === "update") {
@@ -225,6 +225,7 @@ async function openLibrary(rootDir, libId) {
   return libIO(async () => {
     const dir = join(rootDir, libId);
     const meta = parseMeta(await readFile(join(dir, META), "utf8"));
+    if (meta.id !== libId) throw new EngramError("E_LIB_ID_MISMATCH", `meta.json \u7684 id\uFF08${meta.id}\uFF09\u4E0E\u76EE\u5F55\u540D\uFF08${libId}\uFF09\u4E0D\u4E00\u81F4`);
     const logText = await readTextOrNull(join(dir, LOG));
     const snap = parseSnapshot(await readTextOrNull(join(dir, SNAPSHOT)));
     const lastSeq = parseLog(logText).reduce((m, d) => Math.max(m, d.seq), Math.max(0, meta.snapshotSeq, snap?.seq ?? 0));
@@ -245,6 +246,7 @@ async function listLibraries(rootDir) {
     for (const name of names.filter((n) => UUID_RE.test(n)).sort()) {
       try {
         const meta = parseMeta(await readFile(join(rootDir, name, META), "utf8"));
+        if (meta.id !== name) continue;
         out.push({ id: name, displayName: meta.displayName });
       } catch {
       }

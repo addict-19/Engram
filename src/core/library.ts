@@ -194,6 +194,8 @@ export async function openLibrary(rootDir: string, libId: string): Promise<Libra
   return libIO(async () => {
     const dir = join(rootDir, libId);
     const meta = parseMeta(await readFile(join(dir, META), 'utf8'));
+    // 目录被手动复制/改名后 meta.id 会与目录名分叉：拒开，免得 handle.id 与 listLibraries 的 id 对不上
+    if (meta.id !== libId) throw new EngramError('E_LIB_ID_MISMATCH', `meta.json 的 id（${meta.id}）与目录名（${libId}）不一致`);
     const logText = await readTextOrNull(join(dir, LOG));
     const snap = parseSnapshot(await readTextOrNull(join(dir, SNAPSHOT)));
     // 不用 Math.max(...数组) 展开传参：日志永久增长，条数超引擎参数上限（约十万）会抛 RangeError 导致库打不开
@@ -212,6 +214,7 @@ export async function listLibraries(rootDir: string): Promise<Array<{ id: string
     for (const name of names.filter((n) => UUID_RE.test(n)).sort()) {
       try {
         const meta = parseMeta(await readFile(join(rootDir, name, META), 'utf8'));
+        if (meta.id !== name) continue;               // id 与目录名不符（手动复制/改名）：openLibrary 会拒开，列表里也跳过
         out.push({ id: name, displayName: meta.displayName });
       } catch { /* 坏库目录跳过，不连坐 */ }
     }

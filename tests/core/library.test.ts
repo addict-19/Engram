@@ -1,6 +1,6 @@
 // tests/core/library.test.ts
 import { describe, it, expect } from 'vitest';
-import { mkdtemp, appendFile, readFile } from 'node:fs/promises';
+import { mkdtemp, appendFile, readFile, cp, rename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createLibrary, openLibrary, listLibraries } from '../../src/core/library.js';
@@ -112,6 +112,52 @@ describe('library 补充行为', () => {
     const list = await listLibraries(root);
     expect(list).toHaveLength(1);
     expect(list[0]).toMatchObject({ id: a.id, displayName: 'A' });
+  });
+});
+
+describe('meta.id 与目录名一致性', () => {
+  it('复制库目录到新 uuid 名后 openLibrary 抛 E_LIB_ID_MISMATCH，原库不受影响', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'engram-'));
+    const a = await createLibrary(root, 'A');
+    const clone = '11111111-1111-4111-8111-111111111111';
+    await cp(join(root, a.id), join(root, clone), { recursive: true });
+    const err = await openLibrary(root, clone).catch((e) => e);
+    expect(err).toMatchObject({ code: 'E_LIB_ID_MISMATCH' });
+    expect(err.message).not.toMatch(/^E_LIB_/);
+    expect((await openLibrary(root, a.id)).id).toBe(a.id);
+  });
+
+  it('库目录被改名后 openLibrary 抛 E_LIB_ID_MISMATCH', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'engram-'));
+    const a = await createLibrary(root, 'A');
+    const moved = '22222222-2222-4222-8222-222222222222';
+    await rename(join(root, a.id), join(root, moved));
+    await expect(openLibrary(root, moved)).rejects.toMatchObject({ code: 'E_LIB_ID_MISMATCH' });
+  });
+
+  it('listLibraries 跳过 id 不符的目录并继续列出其余库', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'engram-'));
+    const a = await createLibrary(root, 'A');
+    const b = await createLibrary(root, 'B');
+    await cp(join(root, a.id), join(root, '00000000-0000-4000-8000-000000000000'), { recursive: true });
+    const list = await listLibraries(root);
+    expect(list.map((x) => x.id).sort()).toEqual([a.id, b.id].sort());
+  });
+});
+
+describe('原型键 id 端到端', () => {
+  it('__proto__/constructor 作实体 id：落盘、快照、重开后状态正确', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'engram-'));
+    const lib = await createLibrary(root, 'P');
+    await lib.appendDelta({ floor: 1, lib: 'treasury', op: 'create', id: '__proto__', payload: { n: 1 } });
+    await lib.appendDelta({ floor: 1, lib: 'treasury', op: 'update', id: 'toString', payload: { n: 1 } });
+    await lib.writeSnapshot();
+    await lib.appendDelta({ floor: 2, lib: 'treasury', op: 'create', id: 'constructor', payload: { n: 2 } });
+    const re = await openLibrary(root, lib.id);
+    const st = await re.getState('treasury');
+    expect(Object.keys(st).sort()).toEqual(['__proto__', 'constructor']);
+    expect(st['__proto__']).toMatchObject({ id: '__proto__', n: 1 });
+    expect(st['constructor']).toMatchObject({ id: 'constructor', n: 2 });
   });
 });
 
