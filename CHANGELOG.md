@@ -13,6 +13,7 @@
 - 余弦暴力检索 `normalize` / `topK`：纯函数零依赖，入库前 L2 归一化（零向量原样返回零向量），检索时点积即余弦；entry 维度与 query 不符抛 `E_COS_DIM`（不静默产出错误分数）；全量扫描 + 长度 k 最小堆，分数降序；3 万条 512 维约 15ms（测试护栏 < 500ms）。
 - BM25 索引 `BM25Index`：分词器可插拔（v0 `bigramTokenizer`：汉字段二元组/孤字出单字，字母数字段小写整词），Okapi BM25（k1=1.2, b=0.75，idf 取 Lucene 恒正式）；`addAnchor` 锚点整词通道绕过分词，查询串含锚点原词（大小写/空白不敏感，英文锚点要求词边界）即精确加入候选，命中分 = anchorBoost(默认 3)×idf；同 id 再 `add` 为更新语义（替换正文、保留锚点），`remove` 连锚点一起清；`toJSON`/`fromJSON` 存 tf 与文档长度，round-trip 分数一致，格式错误抛 `E_BM25_FORMAT`；序列化带分词器指纹 `tokenizerName`（默认 `bigram-v1`），载入时不符或缺失抛 `E_BM25_TOKENIZER`，拒载并从全文重建，不让新旧分词的 term 混在一起。
 - M1 地基收尾：core barrel 导出与 esbuild 构建脚本（dist/core.js）。
+- 检索管线类型 `src/core/retrieval/types.ts`（Candidate / UnitInfo / UnitMap / Form / InjectionItem）与候选融合 `rrfFuse`：标准 RRF，score=Σ1/(k+rank)，rank 从 1 起、k 默认 60；按位置约定 lists[0]=bm25、lists[1]=vec，同 id 跨列表累加并合并 sources，列表内重复 id 只取最佳名次，输出降序（同分按首次出现稳定）；k 非法抛 `E_FUSE_K`，超两路抛 `E_FUSE_LISTS`。`markAnchors` 只打 `anchorHit` 标不改分。
 
 ### Changed
 - 错误约定统一：错误码只放在 `.code`，message 不再带 `CODE: ` 前缀（vectorStore 的 `E_VEC_*`、cosine 的 `E_COS_DIM` 已去前缀）；库与向量存储的 IO 包装合并为 `errors.ts` 的 `moduleIO(fn, code, modulePrefix)`（本模块错误同对象透传，其余转码、原错误留 cause），错误码与抛错时机不变。
