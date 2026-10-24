@@ -1,7 +1,7 @@
 // src/core/vectorStore.ts
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { EngramError, wrapIO } from './errors.js';
+import { EngramError, moduleIO } from './errors.js';
 import { writeFileAtomic } from './atomicWrite.js';
 
 // 向量指纹：模型/维度/量化一起决定"能不能放在一起算距离"
@@ -29,17 +29,10 @@ export function fnv1a32(bytes: Uint8Array): number {
   return h >>> 0;
 }
 
-// message 以错误码开头：调用方/测试按文本也能认出是哪类错
-const vecErr = (code: string, msg: string, cause?: unknown) => new EngramError(code, `${code}: ${msg}`, cause);
+const vecErr = (code: string, msg: string, cause?: unknown) => new EngramError(code, msg, cause);
 
 // 底层错误（含 writeFileAtomic 的 E_ATOMIC_WRITE）统一翻成 E_VEC_*，原错误留在 cause
-async function vecIO<T>(fn: () => Promise<T>, code: string): Promise<T> {
-  try { return await wrapIO(fn, code); }
-  catch (e) {
-    if (e instanceof EngramError && e.code.startsWith('E_VEC_')) throw e;
-    throw vecErr(code, e instanceof Error ? e.message : String(e), e);
-  }
-}
+const vecIO = <T>(fn: () => Promise<T>, code: string) => moduleIO(fn, code, 'E_VEC_');
 
 export class VectorStore {
   private readonly vecs = new Map<string, Float32Array>();

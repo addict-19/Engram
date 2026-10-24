@@ -66,7 +66,7 @@ export function topK(
     if (vec.length !== dim) {
       throw new EngramError(
         'E_COS_DIM',
-        `E_COS_DIM: entry "${id}" 维度 ${vec.length} 与 query 维度 ${dim} 不符`,
+        `entry "${id}" 维度 ${vec.length} 与 query 维度 ${dim} 不符`,
       );
     }
     const s = dot(query, vec);

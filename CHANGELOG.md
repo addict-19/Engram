@@ -14,6 +14,9 @@
 - BM25 索引 `BM25Index`：分词器可插拔（v0 `bigramTokenizer`：汉字段二元组/孤字出单字，字母数字段小写整词），Okapi BM25（k1=1.2, b=0.75，idf 取 Lucene 恒正式）；`addAnchor` 锚点整词通道绕过分词，查询串含锚点原词（大小写/空白不敏感，英文锚点要求词边界）即精确加入候选，命中分 = anchorBoost(默认 3)×idf；同 id 再 `add` 为更新语义（替换正文、保留锚点），`remove` 连锚点一起清；`toJSON`/`fromJSON` 存 tf 与文档长度，round-trip 分数一致，格式错误抛 `E_BM25_FORMAT`；序列化带分词器指纹 `tokenizerName`（默认 `bigram-v1`），载入时不符或缺失抛 `E_BM25_TOKENIZER`，拒载并从全文重建，不让新旧分词的 term 混在一起。
 - M1 地基收尾：core barrel 导出与 esbuild 构建脚本（dist/core.js）。
 
+### Changed
+- 错误约定统一：错误码只放在 `.code`，message 不再带 `CODE: ` 前缀（vectorStore 的 `E_VEC_*`、cosine 的 `E_COS_DIM` 已去前缀）；库与向量存储的 IO 包装合并为 `errors.ts` 的 `moduleIO(fn, code, modulePrefix)`（本模块错误同对象透传，其余转码、原错误留 cause），错误码与抛错时机不变。
+
 ### Fixed
 - 库：日志条数极多时 openLibrary 不再因展开传参求最大 seq 抛 RangeError；运行中追加失败后，下一次追加先补换行，避免可能残留的半行拼坏新行。
 - 库：appendDelta 写盘前校验 lib/op 合法且能通过 round-trip 解析，不合法抛 `E_LIB_DELTA`，不再出现写入成功、读盘时却被静默丢弃的 delta。

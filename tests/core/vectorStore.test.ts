@@ -22,7 +22,7 @@ describe('VectorStore', () => {
   });
   it('维度不符拒收', () => {
     const s = new VectorStore(fp);
-    expect(() => s.add('x', v(1, 2))).toThrowError(/E_VEC_DIM/);
+    expect(() => s.add('x', v(1, 2))).toThrow(expect.objectContaining({ code: 'E_VEC_DIM' }));
   });
   it('指纹不符拒载（防混算）', async () => {
     const s = new VectorStore(fp);
@@ -32,7 +32,7 @@ describe('VectorStore', () => {
     const idx = JSON.parse(await readFile(join(dir, 'index.json'), 'utf8'));
     idx.fingerprint.model = 'other-model';
     await writeFile(join(dir, 'index.json'), JSON.stringify(idx));
-    await expect(VectorStore.load(dir, fp)).rejects.toThrowError(/E_VEC_FINGERPRINT/);
+    await expect(VectorStore.load(dir, fp)).rejects.toMatchObject({ code: 'E_VEC_FINGERPRINT' });
     // 不传期望指纹：按文件自述载入
     const r = await VectorStore.load(dir);
     expect(r.fingerprint.model).toBe('other-model');
@@ -62,7 +62,7 @@ describe('VectorStore', () => {
     const buf = await readFile(join(dir, 'vectors.bin'));
     buf[5] = buf[5]! ^ 0xff;
     await writeFile(join(dir, 'vectors.bin'), buf);
-    await expect(VectorStore.load(dir)).rejects.toThrowError(/E_VEC_CORRUPT/);
+    await expect(VectorStore.load(dir)).rejects.toMatchObject({ code: 'E_VEC_CORRUPT' });
   });
   it('新 bin 配旧 index 且条数相同时拒载（防错位）', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'engram-'));
@@ -74,7 +74,7 @@ describe('VectorStore', () => {
     s2.add('z', v(0, 0, 0, 1));
     await s2.save(dir);
     await writeFile(join(dir, 'index.json'), oldIdx);
-    await expect(VectorStore.load(dir)).rejects.toThrowError(/E_VEC_CORRUPT/);
+    await expect(VectorStore.load(dir)).rejects.toMatchObject({ code: 'E_VEC_CORRUPT' });
   });
   it('vectors.bin 被截断或加长时拒载', async () => {
     const s = new VectorStore(fp);
@@ -83,9 +83,9 @@ describe('VectorStore', () => {
     await s.save(dir);
     const buf = await readFile(join(dir, 'vectors.bin'));
     await writeFile(join(dir, 'vectors.bin'), buf.subarray(0, 12));
-    await expect(VectorStore.load(dir)).rejects.toThrowError(/E_VEC_CORRUPT/);
+    await expect(VectorStore.load(dir)).rejects.toMatchObject({ code: 'E_VEC_CORRUPT' });
     await writeFile(join(dir, 'vectors.bin'), Buffer.concat([buf, Buffer.alloc(4)]));
-    await expect(VectorStore.load(dir)).rejects.toThrowError(/E_VEC_CORRUPT/);
+    await expect(VectorStore.load(dir)).rejects.toMatchObject({ code: 'E_VEC_CORRUPT' });
   });
   it('add 拷贝向量，外部改动不污染库内数据', () => {
     const s = new VectorStore(fp);
@@ -100,7 +100,7 @@ describe('VectorStore', () => {
     const dir = await mkdtemp(join(tmpdir(), 'engram-'));
     await s.save(dir);
     await writeFile(join(dir, 'vectors.bin'), Buffer.alloc(7));
-    await expect(VectorStore.load(dir)).rejects.toThrowError(/E_VEC_CORRUPT/);
+    await expect(VectorStore.load(dir)).rejects.toMatchObject({ code: 'E_VEC_CORRUPT' });
   });
   it('目录不存在时 IO 错误带 E_VEC_ 前缀', async () => {
     await expect(VectorStore.load(join(tmpdir(), 'engram-nope-' + Date.now()))).rejects

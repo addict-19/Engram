@@ -4,7 +4,7 @@
 import { mkdir, readFile, readdir, appendFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { uuidv4 } from './uuid.js';
-import { EngramError } from './errors.js';
+import { EngramError, moduleIO } from './errors.js';
 import { writeFileAtomic } from './atomicWrite.js';
 import {
   applyDeltas, rollbackView, serializeDelta, parseDeltaLine,
@@ -42,13 +42,7 @@ export interface LibraryHandle {
 }
 
 // 全部 IO 过这一层：底层（含 writeFileAtomic 的 E_ATOMIC_WRITE）统一翻成 E_LIB_*，原错误留在 cause
-async function libIO<T>(fn: () => Promise<T>, code: string): Promise<T> {
-  try { return await fn(); }
-  catch (e) {
-    if (e instanceof EngramError && e.code.startsWith('E_LIB_')) throw e;
-    throw new EngramError(code, e instanceof Error ? e.message : String(e), e);
-  }
-}
+const libIO = <T>(fn: () => Promise<T>, code: string) => moduleIO(fn, code, 'E_LIB_');
 
 function isENOENT(e: unknown): boolean {
   return typeof e === 'object' && e !== null && (e as { code?: unknown }).code === 'ENOENT';

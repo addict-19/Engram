@@ -18,12 +18,21 @@ var EngramError = class extends Error {
   code;
   cause;
 };
+var toMessage = (e) => e instanceof Error ? e.message : String(e);
 async function wrapIO(fn, code) {
   try {
     return await fn();
   } catch (e) {
     if (e instanceof EngramError) throw e;
-    throw new EngramError(code, e instanceof Error ? e.message : String(e), e);
+    throw new EngramError(code, toMessage(e), e);
+  }
+}
+async function moduleIO(fn, code, modulePrefix) {
+  try {
+    return await fn();
+  } catch (e) {
+    if (e instanceof EngramError && e.code.startsWith(modulePrefix)) throw e;
+    throw new EngramError(code, toMessage(e), e);
   }
 }
 
@@ -76,14 +85,7 @@ var META = "meta.json";
 var LOG = "log.jsonl";
 var SNAPSHOT = "snapshot.json";
 var UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-async function libIO(fn, code) {
-  try {
-    return await fn();
-  } catch (e) {
-    if (e instanceof EngramError && e.code.startsWith("E_LIB_")) throw e;
-    throw new EngramError(code, e instanceof Error ? e.message : String(e), e);
-  }
-}
+var libIO = (fn, code) => moduleIO(fn, code, "E_LIB_");
 function isENOENT(e) {
   return typeof e === "object" && e !== null && e.code === "ENOENT";
 }
@@ -270,15 +272,8 @@ function fnv1a32(bytes) {
   }
   return h >>> 0;
 }
-var vecErr = (code, msg, cause) => new EngramError(code, `${code}: ${msg}`, cause);
-async function vecIO(fn, code) {
-  try {
-    return await wrapIO(fn, code);
-  } catch (e) {
-    if (e instanceof EngramError && e.code.startsWith("E_VEC_")) throw e;
-    throw vecErr(code, e instanceof Error ? e.message : String(e), e);
-  }
-}
+var vecErr = (code, msg, cause) => new EngramError(code, msg, cause);
+var vecIO = (fn, code) => moduleIO(fn, code, "E_VEC_");
 var VectorStore = class _VectorStore {
   constructor(fingerprint) {
     this.fingerprint = fingerprint;
@@ -412,7 +407,7 @@ function topK(query, entries, k) {
     if (vec.length !== dim) {
       throw new EngramError(
         "E_COS_DIM",
-        `E_COS_DIM: entry "${id}" \u7EF4\u5EA6 ${vec.length} \u4E0E query \u7EF4\u5EA6 ${dim} \u4E0D\u7B26`
+        `entry "${id}" \u7EF4\u5EA6 ${vec.length} \u4E0E query \u7EF4\u5EA6 ${dim} \u4E0D\u7B26`
       );
     }
     const s = dot(query, vec);
