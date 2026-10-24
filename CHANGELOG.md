@@ -16,6 +16,7 @@
 - 检索管线类型 `src/core/retrieval/types.ts`（Candidate / UnitInfo / UnitMap / Form / InjectionItem）与候选融合 `rrfFuse`：标准 RRF，score=Σ1/(k+rank)，rank 从 1 起、k 默认 60；按位置约定 lists[0]=bm25、lists[1]=vec，同 id 跨列表累加并合并 sources，列表内重复 id 只取最佳名次，输出降序（同分按首次出现稳定）；k 非法抛 `E_FUSE_K`，超两路抛 `E_FUSE_LISTS`。`markAnchors` 只打 `anchorHit` 标不改分。
 - 加权层 `applyWeights`：@关联轻加权（默认 1.2 倍，新关联脉冲期 1.5 倍，同在两集合取脉冲不叠乘）× importance 加权（`1 + importance×0.02`，缺省按 0）得自然加权分，再与回响保底取 max（`max(自然分, 上轮分×0.6)`，自然分高时不被拉低）；上轮入选本轮无候选的 id 以保底分补入（sources 空、无 anchorHit）；输出降序（同分稳定），保留 sources/anchorHit，不改入参。
 - 断崖检测 `detectCliff` / `passFloor`：通用相对领先判定器，在降序分数前 min(maxLead, n-1) 个相邻间隔里找触发强度最大的落差（ratio 与 margin 各自按阈值归一化取较强者，并列取靠前），满足 ratio（默认 1.5 倍）或 margin（默认不启用）任一即返回断档位置 k（前 k 条领先，k ≤ maxLead 默认 3），否则 0；单元素正分返回 1，空数组/全 0 返回 0；后项 ≤0 视为无穷倍领先不除零；可选 minScore 要求断点前各条不低于该分。`passFloor` 即 `score >= floor`。
+- 金字塔充能与聚集升级 `gradeAndCluster`：切片分数沿 parent 链累加为各祖先充能，`directNodeHits` 中的节额外 +1 充能（自身与祖先并账）并直接触发节内聚集；切片按 precise（断崖前）> nodeCluster（同节命中 ≥ nodeClusterMin 默认 2，或节被直接命中）> chapterCluster（同章跨 ≥2 个节，直接命中节也计入）> mention 互斥归档；升级产物按档位表输出（精准/节聚集：节 body + 章 summary + 卷 summary；章聚集：章 body + 卷 summary），precise 按切片、节/章聚集按单元各出一组，祖先缺层跳过不报错，直接命中但无命中切片的节仍产出节聚集升级；parent 断链/成环安全终止。
 
 ### Changed
 - 错误约定统一：错误码只放在 `.code`，message 不再带 `CODE: ` 前缀（vectorStore 的 `E_VEC_*`、cosine 的 `E_COS_DIM` 已去前缀）；库与向量存储的 IO 包装合并为 `errors.ts` 的 `moduleIO(fn, code, modulePrefix)`（本模块错误同对象透传，其余转码、原错误留 cause），错误码与抛错时机不变。
